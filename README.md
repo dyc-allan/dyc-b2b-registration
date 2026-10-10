@@ -9,6 +9,7 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Modulus 10 (Luhn algorithm) checksum verification.
   - EU VIES REST API verification (`SE` + 10-digit org.nr + `01`).
   - Interactive "Hämta uppgifter" AJAX button that auto-populates registered company name (shortcode form).
+  - Automatic lookup when the customer leaves the org.nr field, filling in a read-only company name field (Kadence form).
   - The company name registered at VIES always overwrites the submitted company name.
 - **Corporate Email Verification**: Rejects consumer email providers (Gmail, Hotmail, etc.).
 - **Automatic Account Setup**:
@@ -18,10 +19,16 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Automatically logs in the new customer.
   - Shows a one-time "Företaget är nu registrerat!" dialog on the page the customer is redirected to (Kadence form).
 - **Role-Based Field Visibility**:
-  - `billing_company`, `billing_orgnr`, `billing_invoice_email` and `shipping_company` are hidden from retail B2C customers on checkout and account addresses.
+  - `billing_company`, `billing_orgnr`, `billing_invoice_email` and `shipping_company` are shown on checkout and My Account addresses only to the `business`, `administrator` and `shop_manager` roles, and hidden from retail customers (`customer` role) and guests.
   - Keeps standard WooCommerce registration (`/mina-sidor/`) 100% clean for retail consumers.
   - Runs after Kadence Woo Extras' checkout field editor, which would otherwise re-add the fields for everyone.
-- **Locked Organisationsnummer**: Once stored, `billing_orgnr` is read-only for the customer in My Account and at checkout, and any submitted change is ignored server-side.
+- **Locked Organisationsnummer**: Once stored, `billing_orgnr` is read-only for the customer in My Account and at checkout, and any submitted change is ignored server-side. Users without a stored org.nr can still enter one. Change it from WP-Admin if needed.
+- **WP-Admin**: Org.nr and invoice email are shown on the order and user edit screens.
+
+## Setup
+
+1. Add `billing_orgnr` (Organisationsnr) and `billing_invoice_email` (Faktura email) as billing fields in Kadence Woo Extras' checkout field editor. The plugin does not add these fields itself; it only controls who sees them and locks the org.nr.
+2. Build the registration form, either with the shortcode or as a Kadence Advanced Form (see below).
 
 ## Kadence Advanced Form Integration
 
@@ -59,10 +66,15 @@ The plugin validates the form and creates the account itself through Kadence's s
 
 ### Error handling
 
-Validation errors are shown in the form with a Swedish message and nothing is created. If account creation still fails, the form shows the WooCommerce error instead of the success message, and the redirect is skipped.
+Validation errors are shown in the form with a Swedish message and nothing is created. Org.nr lookup errors are shown directly under the org.nr field when the customer leaves it. If account creation still fails, the form shows the WooCommerce error instead of the success message, and the redirect is skipped.
 
 ## Requirements
 - WordPress 5.8+
 - WooCommerce 5.0+
 - PHP 7.4+ with cURL extension
 - Kadence Blocks (optional, for the Advanced Form integration)
+- Kadence Woo Extras checkout field editor (or another way of registering `billing_orgnr` and `billing_invoice_email` as WooCommerce billing fields)
+
+## Development
+
+The local site caches PHP with OPcache. If `opcache.validate_timestamps = 0` in the project's `local.ini`, changes to this plugin don't reach the website until the container is restarted with `docker compose restart wordpress`.

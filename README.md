@@ -16,9 +16,12 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Generates a unique username from the email address (`info`, `info-2`, ...); customers log in with their email.
   - Saves all billing and shipping metadata (including `billing_orgnr` and `billing_invoice_email`).
   - Automatically logs in the new customer.
+  - Shows a one-time "Företaget är nu registrerat!" dialog on the page the customer is redirected to (Kadence form).
 - **Role-Based Field Visibility**:
   - `billing_company`, `billing_orgnr`, `billing_invoice_email` and `shipping_company` are hidden from retail B2C customers on checkout and account addresses.
   - Keeps standard WooCommerce registration (`/mina-sidor/`) 100% clean for retail consumers.
+  - Runs after Kadence Woo Extras' checkout field editor, which would otherwise re-add the fields for everyone.
+- **Locked Organisationsnummer**: Once stored, `billing_orgnr` is read-only for the customer in My Account and at checkout, and any submitted change is ignored server-side.
 
 ## Kadence Advanced Form Integration
 

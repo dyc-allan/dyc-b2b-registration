@@ -58,8 +58,14 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             register_deactivation_hook( DYC_B2B_REGISTRATION_FILE, array( $this, 'deactivate' ) );
 
             // Role-based field filtering (only B2B / Admin roles see company & orgnr in standard checkout/addresses)
-            add_filter( 'woocommerce_billing_fields', array( $this, 'filter_billing_fields_by_role' ), 20 );
-            add_filter( 'woocommerce_shipping_fields', array( $this, 'filter_shipping_fields_by_role' ), 20 );
+            // Late priority: Kadence Woo Extras' checkout editor rebuilds these fields from its settings at 99/100
+            add_filter( 'woocommerce_billing_fields', array( $this, 'filter_billing_fields_by_role' ), 1000 );
+            add_filter( 'woocommerce_shipping_fields', array( $this, 'filter_shipping_fields_by_role' ), 1000 );
+            add_filter( 'woocommerce_checkout_fields', array( $this, 'filter_checkout_fields_by_role' ), 1000 );
+
+            // Registered org.nr can't be changed by the customer
+            add_filter( 'woocommerce_process_myaccount_field_billing_orgnr', array( $this, 'lock_orgnr_on_address_save' ) );
+            add_filter( 'woocommerce_checkout_posted_data', array( $this, 'lock_orgnr_on_checkout' ) );
             add_filter( 'woocommerce_admin_billing_fields', array( $this, 'add_admin_billing_fields' ) );
 
             // Standalone B2B registration shortcodes
@@ -83,6 +89,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             // Kadence Advanced Form: VIES company name lookup when leaving the org.nr field
             add_filter( 'render_block_kadence/advanced-form-text', array( $this, 'kadence_detect_orgnr_field' ), 10, 2 );
             add_action( 'wp_footer', array( $this, 'kadence_print_lookup_script' ) );
+
+            // One-time "registration complete" dialog on the page the customer is redirected to
+            add_action( 'wp_footer', array( $this, 'print_welcome_dialog' ) );
         }
 
         public function init() {
@@ -138,9 +147,46 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 if ( isset( $fields['billing_invoice_email'] ) ) {
                     unset( $fields['billing_invoice_email'] );
                 }
+            } elseif ( isset( $fields['billing_orgnr'] ) && '' !== $this->get_locked_orgnr() ) {
+                // Org.nr is fixed once registered; enforced server-side in lock_orgnr_on_* below
+                $fields['billing_orgnr']['custom_attributes'] = array_merge(
+                    isset( $fields['billing_orgnr']['custom_attributes'] ) ? (array) $fields['billing_orgnr']['custom_attributes'] : array(),
+                    array(
+                        'readonly' => 'readonly',
+                        'style'    => 'background-color:#f0f0f0;color:#555;cursor:not-allowed;',
+                    )
+                );
+                $fields['billing_orgnr']['description'] = __( 'Organisationsnumret kan inte ändras. Kontakta oss om det behöver uppdateras.', 'dyc-b2b-registration' );
             }
 
             return $fields;
+        }
+
+        /**
+         * The current user's stored org.nr, or '' if none (nothing to lock)
+         */
+        private function get_locked_orgnr() {
+            $user_id = get_current_user_id();
+            return $user_id ? (string) get_user_meta( $user_id, 'billing_orgnr', true ) : '';
+        }
+
+        /**
+         * My Account address save: ignore any posted org.nr and keep the stored one
+         */
+        public function lock_orgnr_on_address_save( $value ) {
+            $locked = $this->get_locked_orgnr();
+            return '' !== $locked ? $locked : $value;
+        }
+
+        /**
+         * Checkout: ignore any posted org.nr and keep the stored one (also used for the order)
+         */
+        public function lock_orgnr_on_checkout( $data ) {
+            $locked = $this->get_locked_orgnr();
+            if ( '' !== $locked && array_key_exists( 'billing_orgnr', $data ) ) {
+                $data['billing_orgnr'] = $locked;
+            }
+            return $data;
         }
 
         /**
@@ -157,6 +203,19 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 }
             }
 
+            return $fields;
+        }
+
+        /**
+         * Apply the same role filtering to the checkout field groups (also rebuilt by Kadence Woo Extras)
+         */
+        public function filter_checkout_fields_by_role( $fields ) {
+            if ( isset( $fields['billing'] ) && is_array( $fields['billing'] ) ) {
+                $fields['billing'] = $this->filter_billing_fields_by_role( $fields['billing'] );
+            }
+            if ( isset( $fields['shipping'] ) && is_array( $fields['shipping'] ) ) {
+                $fields['shipping'] = $this->filter_shipping_fields_by_role( $fields['shipping'] );
+            }
             return $fields;
         }
 
@@ -576,6 +635,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             update_user_meta( $customer_id, 'shipping_city', $s_city );
             update_user_meta( $customer_id, 'shipping_country', $s_country );
 
+            // Kadence redirects straight away, so confirm the registration on the next page instead
+            update_user_meta( $customer_id, '_dyc_b2b_show_welcome', 1 );
+
             // Automatically log in newly created customer
             wp_set_current_user( $customer_id );
             wp_set_auth_cookie( $customer_id );
@@ -727,6 +789,46 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                     orgnr.addEventListener( 'blur', lookup );
                     orgnr.addEventListener( 'change', lookup );
                 } );
+            } )();
+            </script>
+            <?php
+        }
+
+        /**
+         * Show a one-time confirmation dialog after a Kadence registration (flag set in kadence_process_advanced_form)
+         */
+        public function print_welcome_dialog() {
+            $user_id = get_current_user_id();
+            if ( ! $user_id || ! get_user_meta( $user_id, '_dyc_b2b_show_welcome', true ) ) {
+                return;
+            }
+            delete_user_meta( $user_id, '_dyc_b2b_show_welcome' );
+            ?>
+            <dialog id="dyc-welcome-dialog" class="dyc-welcome-dialog" aria-labelledby="dyc-welcome-title">
+                <p id="dyc-welcome-title" class="dyc-welcome-title"><?php esc_html_e( 'Företaget är nu registrerat!', 'dyc-b2b-registration' ); ?></p>
+                <form method="dialog">
+                    <button type="submit" class="button dyc-welcome-ok" autofocus><?php esc_html_e( 'OK', 'dyc-b2b-registration' ); ?></button>
+                </form>
+            </dialog>
+            <style>
+                .dyc-welcome-dialog { border: none; border-radius: 8px; padding: 28px 32px; max-width: min(90vw, 380px); text-align: center; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25); }
+                .dyc-welcome-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+                .dyc-welcome-title { margin: 0 0 20px; font-size: 1.25em; font-weight: 600; }
+                .dyc-welcome-ok { min-width: 100px; }
+            </style>
+            <script>
+            ( function () {
+                var dialog = document.getElementById( 'dyc-welcome-dialog' );
+                if ( dialog && typeof dialog.showModal === 'function' ) {
+                    dialog.showModal();
+                    // Close when clicking the backdrop
+                    dialog.addEventListener( 'click', function ( e ) {
+                        var r = dialog.getBoundingClientRect();
+                        if ( e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom ) {
+                            dialog.close();
+                        }
+                    } );
+                }
             } )();
             </script>
             <?php

@@ -8,7 +8,8 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
 - **Swedish Organisationsnummer Validation**:
   - Modulus 10 (Luhn algorithm) checksum verification.
   - EU VIES REST API verification (`SE` + 10-digit org.nr + `01`).
-  - Interactive "Hämta uppgifter" AJAX button that auto-populates registered company name (shortcode form only).
+  - Interactive "Hämta uppgifter" AJAX button that auto-populates registered company name (shortcode form).
+  - The company name registered at VIES always overwrites the submitted company name.
 - **Corporate Email Verification**: Rejects consumer email providers (Gmail, Hotmail, etc.).
 - **Automatic Account Setup**:
   - Creates customer account and assigns the `business` user role.
@@ -30,7 +31,7 @@ Set each field's **Field Name** (the input's `name` attribute) to match the WooC
 | Field Name | Required | Notes |
 |---|---|---|
 | `billing_orgnr` | Yes | Identifies the form as a B2B registration. Accepts `5560125790`, `556012-5790` or a 12-digit number with century prefix. Saved as `NNNNNN-NNNN`. |
-| `billing_company` | Yes | |
+| `billing_company` | Yes | Read-only and filled in from VIES when the customer leaves the org.nr field. Unlocks for manual entry if VIES has no name (service down or name not disclosed). The VIES name is also enforced server-side. |
 | `billing_first_name` | Yes | |
 | `billing_last_name` | Yes | |
 | `billing_email` | Yes | Must be a corporate address and not already registered. Used as the login email. |

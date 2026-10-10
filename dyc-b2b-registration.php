@@ -41,6 +41,8 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
 
         private static $instance = null;
         private static $kadence_error = '';
+        private static $kadence_vies_company = '';
+        private static $kadence_has_orgnr_field = false;
 
         public static function get_instance() {
             if ( null === self::$instance ) {
@@ -77,6 +79,10 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             add_action( 'kadence_blocks_advanced_form_submission', array( $this, 'kadence_process_advanced_form' ), 10, 3 );
             add_filter( 'kadence_blocks_advanced_form_submission_success', array( $this, 'kadence_submission_success' ), 10, 5 );
             add_filter( 'kadence_blocks_advanced_form_submission_messages', array( $this, 'kadence_submission_messages' ), 10, 5 );
+
+            // Kadence Advanced Form: VIES company name lookup when leaving the org.nr field
+            add_filter( 'render_block_kadence/advanced-form-text', array( $this, 'kadence_detect_orgnr_field' ), 10, 2 );
+            add_action( 'wp_footer', array( $this, 'kadence_print_lookup_script' ) );
         }
 
         public function init() {
@@ -226,6 +232,16 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             }
 
             return null; // Return null if service is unreachable
+        }
+
+        /**
+         * Registered company name from a VIES response, or '' if unavailable ('---' means not disclosed)
+         */
+        public static function vies_company_name( $vies ) {
+            if ( empty( $vies['name'] ) || '---' === trim( $vies['name'] ) ) {
+                return '';
+            }
+            return sanitize_text_field( $vies['name'] );
         }
 
         /**
@@ -398,11 +414,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             $password   = $this->kadence_get_password( 'password' );
             $password_c = $this->kadence_get_password( 'password_confirm' );
 
-            // 1. Required fields
-            if ( empty( $company ) ) {
-                self::$kadence_error = __( 'Företagsnamn är obligatoriskt.', 'dyc-b2b-registration' );
-                return true;
-            }
+            // 1. Required fields (company name is checked after the VIES lookup, which may supply it)
             if ( empty( $first_name ) || empty( $last_name ) ) {
                 self::$kadence_error = __( 'Kontaktperson (för- och efternamn) är obligatoriskt.', 'dyc-b2b-registration' );
                 return true;
@@ -422,6 +434,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             $vies = self::query_vies_vat( $clean_org );
             if ( $vies !== null && empty( $vies['isValid'] ) ) {
                 self::$kadence_error = __( 'Organisationsnumret kunde inte verifieras som ett aktivt momsregistrerat företag hos Skatteverket/VIES.', 'dyc-b2b-registration' );
+                return true;
+            }
+
+            // The registered name always wins over what was typed; kept for kadence_process_advanced_form()
+            self::$kadence_vies_company = self::vies_company_name( $vies );
+            if ( empty( self::$kadence_vies_company ) && empty( $company ) ) {
+                self::$kadence_error = __( 'Företagsnamn är obligatoriskt.', 'dyc-b2b-registration' );
                 return true;
             }
 
@@ -485,7 +504,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             };
 
             $orgnr       = $get( 'billing_orgnr' );
-            $company     = $get( 'billing_company' );
+            $company     = self::$kadence_vies_company ?: $get( 'billing_company' );
             $first_name  = $get( 'billing_first_name' );
             $last_name   = $get( 'billing_last_name' );
             $email       = sanitize_email( $get( 'billing_email' ) );
@@ -586,6 +605,134 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         }
 
         /**
+         * Kadence Advanced Form: Note when a billing_orgnr field is rendered so the lookup script is only printed on that page
+         */
+        public function kadence_detect_orgnr_field( $block_content, $block ) {
+            if ( isset( $block['attrs']['inputName'] ) && 'billing_orgnr' === $block['attrs']['inputName'] ) {
+                self::$kadence_has_orgnr_field = true;
+            }
+            return $block_content;
+        }
+
+        /**
+         * Kadence Advanced Form: Look up the org.nr at VIES when the field is left and fill in the
+         * registered company name in a read-only company field. The field unlocks if VIES has no name.
+         */
+        public function kadence_print_lookup_script() {
+            if ( ! self::$kadence_has_orgnr_field ) {
+                return;
+            }
+
+            $config = array(
+                'ajaxUrl' => admin_url( 'admin-ajax.php' ),
+                'nonce'   => wp_create_nonce( 'dyc_b2b_nonce' ),
+                'i18n'    => array(
+                    'checking'    => __( 'Kontrollerar hos Skatteverket/VIES...', 'dyc-b2b-registration' ),
+                    'placeholder' => __( 'Fylls i automatiskt från organisationsnumret', 'dyc-b2b-registration' ),
+                    'manual'      => __( 'Företagsnamnet kunde inte hämtas automatiskt. Vänligen fyll i det själv.', 'dyc-b2b-registration' ),
+                    'unreachable' => __( 'Kunde inte kontakta valideringstjänsten. Vänligen fyll i företagsnamnet själv.', 'dyc-b2b-registration' ),
+                ),
+            );
+            ?>
+            <style>
+                .kb-advanced-form input[name="billing_company"][readonly] { background-color: #f0f0f0; color: #555; cursor: not-allowed; }
+                .dyc-orgnr-status { display: block; margin-top: 4px; font-size: 0.875em; }
+                .dyc-orgnr-status.is-success { color: #1e7e34; }
+                .dyc-orgnr-status.is-error { color: #b32d2e; }
+            </style>
+            <script>
+            ( function () {
+                var cfg = <?php echo wp_json_encode( $config ); ?>;
+
+                document.querySelectorAll( 'form.kb-advanced-form' ).forEach( function ( form ) {
+                    var orgnr   = form.querySelector( 'input[name="billing_orgnr"]' );
+                    var company = form.querySelector( 'input[name="billing_company"]' );
+                    if ( ! orgnr || ! company ) {
+                        return;
+                    }
+
+                    var status = document.createElement( 'span' );
+                    status.className = 'dyc-orgnr-status';
+                    status.setAttribute( 'aria-live', 'polite' );
+                    orgnr.insertAdjacentElement( 'afterend', status );
+
+                    function lock() {
+                        company.readOnly = true;
+                        company.placeholder = cfg.i18n.placeholder;
+                    }
+                    function unlock() {
+                        company.readOnly = false;
+                        company.placeholder = '';
+                    }
+                    function setStatus( text, type ) {
+                        status.textContent = text;
+                        status.className = 'dyc-orgnr-status' + ( type ? ' is-' + type : '' );
+                    }
+
+                    lock();
+
+                    var lastLookup = '';
+                    function lookup() {
+                        var digits = orgnr.value.replace( /\D/g, '' );
+                        if ( digits === lastLookup ) {
+                            return;
+                        }
+                        lastLookup = digits;
+
+                        if ( digits.length !== 10 && digits.length !== 12 ) {
+                            company.value = '';
+                            lock();
+                            setStatus( '', '' );
+                            return;
+                        }
+
+                        setStatus( cfg.i18n.checking, '' );
+                        var data = new FormData();
+                        data.append( 'action', 'dyc_lookup_orgnr' );
+                        data.append( 'nonce', cfg.nonce );
+                        data.append( 'orgnr', orgnr.value );
+
+                        fetch( cfg.ajaxUrl, { method: 'POST', body: data, credentials: 'same-origin' } )
+                            .then( function ( r ) { return r.json(); } )
+                            .then( function ( res ) {
+                                if ( ! res || typeof res !== 'object' ) {
+                                    throw new Error( 'Unexpected response' ); // e.g. "-1" from an expired nonce on a cached page
+                                }
+                                if ( digits !== orgnr.value.replace( /\D/g, '' ) ) {
+                                    return; // Field changed while waiting; a newer lookup will follow
+                                }
+                                if ( res.success && res.data.company_name ) {
+                                    company.value = res.data.company_name;
+                                    lock();
+                                    orgnr.value = res.data.formatted || orgnr.value;
+                                    lastLookup = orgnr.value.replace( /\D/g, '' );
+                                    setStatus( res.data.message, 'success' );
+                                } else if ( res.success ) {
+                                    // Valid number but VIES gave no name (service down or name not disclosed)
+                                    unlock();
+                                    setStatus( cfg.i18n.manual, 'error' );
+                                } else {
+                                    company.value = '';
+                                    lock();
+                                    setStatus( res.data && res.data.message ? res.data.message : cfg.i18n.unreachable, 'error' );
+                                }
+                            } )
+                            .catch( function () {
+                                lastLookup = '';
+                                unlock();
+                                setStatus( cfg.i18n.unreachable, 'error' );
+                            } );
+                    }
+
+                    orgnr.addEventListener( 'blur', lookup );
+                    orgnr.addEventListener( 'change', lookup );
+                } );
+            } )();
+            </script>
+            <?php
+        }
+
+        /**
          * Handle B2B Registration Form POST Submission (Shortcode fallback)
          */
         public function handle_b2b_registration_submit() {
@@ -622,9 +769,6 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             if ( empty( $orgnr ) ) {
                 $errors->add( 'empty_orgnr', __( 'Organisationsnummer är obligatoriskt.', 'dyc-b2b-registration' ) );
             }
-            if ( empty( $company ) ) {
-                $errors->add( 'empty_company', __( 'Företagsnamn är obligatoriskt.', 'dyc-b2b-registration' ) );
-            }
             if ( empty( $first_name ) || empty( $last_name ) ) {
                 $errors->add( 'empty_name', __( 'Kontaktperson (för- och efternamn) är obligatoriskt.', 'dyc-b2b-registration' ) );
             }
@@ -657,7 +801,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 $vies = self::query_vies_vat( $clean_org );
                 if ( $vies !== null && empty( $vies['isValid'] ) ) {
                     $errors->add( 'vies_failed', __( 'Organisationsnumret kunde inte verifieras som ett aktivt momsregistrerat företag hos Skatteverket/VIES.', 'dyc-b2b-registration' ) );
+                } elseif ( self::vies_company_name( $vies ) ) {
+                    // The registered name always wins over what was typed
+                    $company = self::vies_company_name( $vies );
                 }
+            }
+            if ( empty( $company ) ) {
+                $errors->add( 'empty_company', __( 'Företagsnamn är obligatoriskt.', 'dyc-b2b-registration' ) );
             }
 
             if ( $errors->has_errors() ) {

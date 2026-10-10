@@ -24,6 +24,7 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Runs after Kadence Woo Extras' checkout field editor, which would otherwise re-add the fields for everyone.
 - **Locked Organisationsnummer**: Once stored, `billing_orgnr` is read-only for the customer in My Account and at checkout, and any submitted change is ignored server-side. Users without a stored org.nr can still enter one. Change it from WP-Admin if needed.
 - **WP-Admin**: Org.nr and invoice email are shown on the order and user edit screens.
+- **Briox Sync**: New business customers are created as customers in Briox, and later address changes are sent to Briox (see below).
 
 ## Setup
 
@@ -68,12 +69,55 @@ The plugin validates the form and creates the account itself through Kadence's s
 
 Validation errors are shown in the form with a Swedish message and nothing is created. Org.nr lookup errors are shown directly under the org.nr field when the customer leaves it. If account creation still fails, the form shows the WooCommerce error instead of the success message, and the redirect is skipped.
 
+## Briox Integration
+
+Business customers (role `business`) are synced to the invoicing system Briox (Swedish API, `https://api-se.briox.services/v2`). The full plan, API findings and test log are in [BRIOX_INTEGRATION_PLAN.md](BRIOX_INTEGRATION_PLAN.md).
+
+### Configuration
+
+Add to `wp-config.php` (above the "stop editing" line):
+
+```php
+define( 'DYC_BRIOX_ENV', 'test' );       // 'test' or 'prod' (shown in WP-Admin)
+define( 'DYC_BRIOX_CLIENT_ID', '...' );  // account number under "Your account" in Briox
+define( 'DYC_BRIOX_AUTH_TOKEN', '...' ); // Admin -> Users -> External Applications -> generate token
+```
+
+The plugin exchanges these for an access token (valid 30 days) and refreshes it automatically. Tokens are stored in the option `dyc_briox_tokens`. Changing the credentials (e.g. test to prod) makes the plugin fetch new tokens.
+
+### What is synced
+
+| When | What happens |
+|---|---|
+| A business customer registers (Kadence form or shortcode) | A Briox customer is created; Briox assigns the customer number |
+| The customer saves an address in My Account, or an admin saves the user profile | The Briox customer is updated |
+
+- **One Briox customer per WordPress user**, even if the org.nr already exists in Briox. The Briox customer number is stored in user meta `_dyc_briox_customer_id`, and the user is never created twice.
+- **New customers get:** payment terms 15 days, price list A, invoices by print, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
+- **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. Briox's update replaces the whole customer, so a partial update would wipe other fields.
+- **Invoice template:** the API can't set a customer's default template. "DYC-Faktura" is set as the account-wide default template in Briox.
+
+### Background processing and retries
+
+Syncs run in the background through WooCommerce's Action Scheduler (hook `dyc_briox_sync_customer`, group `dyc-briox`), so registration never waits for, or fails because of, Briox.
+
+- Temporary errors (timeouts, Briox down, HTTP 5xx/429) are retried after 1 min, 5 min, 30 min, 2 h and 12 h. Validation errors are not retried.
+- If Briox created a customer but the answer was lost, the retry finds it by email and org.nr instead of creating a duplicate.
+- **Action Scheduler needs WP-Cron to run.** If `DISABLE_WP_CRON` is set in `wp-config.php`, a server cron job must call `wp-cron.php` (e.g. every minute), or queued syncs will wait.
+
+### Monitoring
+
+- **User profile (WP-Admin):** a "Briox" section shows the customer number, sync status and last error, with a **"Synka till Briox nu"** button that syncs immediately.
+- **Log:** WooCommerce → Status → Logs, source `dyc-briox`. Tokens are never logged.
+- **Queue:** Tools → Scheduled Actions, search for `dyc_briox_sync_customer`.
+
 ## Requirements
 - WordPress 5.8+
 - WooCommerce 5.0+
 - PHP 7.4+ with cURL extension
 - Kadence Blocks (optional, for the Advanced Form integration)
 - Kadence Woo Extras checkout field editor (or another way of registering `billing_orgnr` and `billing_invoice_email` as WooCommerce billing fields)
+- For the Briox sync: Briox API credentials, and a working WP-Cron (or a server cron calling `wp-cron.php`)
 
 ## Development
 

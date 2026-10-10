@@ -4,7 +4,7 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
 
 **How to use this file:** This file lives in the `dyc-b2b-registration` plugin folder (versioned in its git repo). Check off steps as they are completed and add a line to the [Session log](#session-log). To resume in a new session, ask Claude to read this file and continue from the first unchecked step.
 
-**Status:** Phase 2 done; next is Phase 3 (build) (last updated 2026-10-10)
+**Status:** Phase 3 built and tested on branch `briox-sync` (not merged yet). Next: Phase 4 tests (last updated 2026-10-11)
 
 ---
 
@@ -17,7 +17,8 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
   - registration through a Kadence Advanced Form (form #10282, page `/foretagsregistrering/`) or the shortcode `[dyc_b2b_registration]`
 - **PHP cache:** `local.ini` may have `opcache.validate_timestamps = 0`. If so, PHP changes only reach the website after `docker compose restart wordpress`. CLI runs (`docker exec wordpress_app php ...`) are not affected.
 - **Git:** no global git identity is configured. Commits so far use `git -c user.name="DYC Development" -c user.email="dev@dyc.local"`. Work goes on a branch, which the user merges into `main` (fast-forward).
-- **Test data:** use fake domains such as `@dyc-test-a.se` and delete test users and customers afterwards.
+- **Test data:** use fake domains such as `@dyc-test-a.se`. Delete WordPress test users afterwards, but **keep Briox test customers** (user's wish, useful for troubleshooting).
+- **WP-Cron is disabled on the dev site** (`define( 'DISABLE_WP_CRON', true );` in wp-config.php) and no server cron runs, so Action Scheduler jobs are never processed automatically here. Other plugins' jobs have been waiting since June 2026; **don't run the whole queue**. To process only a Briox sync job: `ActionScheduler::runner()->process_action( $action_id, 'manual' )` for the pending `dyc_briox_sync_customer` action, or use the "Synka till Briox nu" button on the user profile.
 - **Credentials:** never in chat or git. Put them in `wordpress/wp-config.php` as constants (see Phase 0).
 
 ## API reference (summary)
@@ -87,7 +88,7 @@ Required fields in Briox: `custno` and `name`.
   - 400 `Customer missing!` (GET unknown custno or email)
   - 400 `Payment method is invalid.` (unknown `paymentterms`)
 - [ ] Rate limits (not documented)
-- [ ] `PUT /customer/{id}` behaviour: partial update, or are fields/arrays not sent (e.g. `address[]`, `edocument[]`) wiped? Not tested in Phase 1; test first in 3.6 on a test customer
+- [x] `PUT /customer/{id}` behaviour: **full replace.** Scalar fields not sent are cleared (tested on 90002: email, org.nr, VAT number, payment terms, reference wiped; delivery methods reset to `00`). `address[]`/`edocument[]` not sent are kept, but the delivery address `name` is cleared. Updates must be read → merge → PUT the complete object (implemented; 90002 restored this way)
 - [x] How to register a custom integration / get an Application ID: **not needed for the test account**, since the token exchange works with only client ID + auth token. Check whether production needs anything else.
 
 ---
@@ -147,27 +148,36 @@ Record each answer here:
 - 2.5: **Inside `dyc-b2b-registration`** (not a separate plugin). Phase 3 steps adjusted accordingly.
 
 ## Phase 3: Build (Claude)
-- [ ] 3.1 Add a Briox module to `dyc-b2b-registration` (per 2.5, e.g. `includes/class-dyc-briox-*.php`); read credentials from the `wp-config.php` constants
-- [ ] 3.2 Fire `do_action( 'dyc_b2b_customer_registered', $customer_id )` after the account is created (Kadence and shortcode handlers); the Briox module hooks into it
-- [ ] 3.3 API client: get, store and refresh tokens; timeouts; retry temporary errors; log to the WooCommerce logger (source `dyc-briox`)
-- [ ] 3.4 Mapper: WordPress user → Briox `customer` object (see the field mapping)
-- [ ] 3.5 Background sync with Action Scheduler: if the user has `_dyc_briox_customer_id`, update; otherwise create (no org.nr linking, per 2.2) and save the returned custno; retry on failure. Watch for a lost response after a successful create, which would cause a duplicate on retry (e.g. check `GET /customer/email/{email}` before re-creating)
-- [ ] 3.6 Update sync on My Account changes (2.4 = yes): `woocommerce_customer_save_address` → queue `PUT /customer/{custno}`. First test PUT behaviour on a test customer (partial vs full replace, see Unknowns) and send the full object if needed. Possibly also sync on admin edits of a business user (`profile_update`)
-- [ ] 3.7 Admin: Briox customer number and sync status on the user profile, plus a "Sync now" button
-- [ ] 3.8 Update the plugin README (Briox section)
+- [x] 3.1 Add a Briox module to `dyc-b2b-registration` (per 2.5, e.g. `includes/class-dyc-briox-*.php`); read credentials from the `wp-config.php` constants
+- [x] 3.2 Fire `do_action( 'dyc_b2b_customer_registered', $customer_id )` after the account is created (Kadence and shortcode handlers); the Briox module hooks into it
+- [x] 3.3 API client: get, store and refresh tokens; timeouts; retry temporary errors; log to the WooCommerce logger (source `dyc-briox`)
+- [x] 3.4 Mapper: WordPress user → Briox `customer` object (see the field mapping)
+- [x] 3.5 Background sync with Action Scheduler: if the user has `_dyc_briox_customer_id`, update; otherwise create (no org.nr linking, per 2.2) and save the returned custno; retry on failure. Watch for a lost response after a successful create, which would cause a duplicate on retry (e.g. check `GET /customer/email/{email}` before re-creating)
+- [x] 3.6 Update sync on My Account changes (2.4 = yes): `woocommerce_customer_save_address` → queue `PUT /customer/{custno}`. First test PUT behaviour on a test customer (partial vs full replace, see Unknowns) and send the full object if needed. Possibly also sync on admin edits of a business user (`profile_update`)
+- [x] 3.7 Admin: Briox customer number and sync status on the user profile, plus a "Sync now" button
+- [x] 3.8 Update the plugin README (Briox section)
+
+**Phase 3 implementation (plugin v1.3.0):**
+- `includes/class-dyc-briox-client.php`: tokens in option `dyc_briox_tokens` (with a credentials hash, so changed wp-config credentials fetch new tokens), refresh 1 day before expiry under a MySQL `GET_LOCK`, one retry after a 401, errors as `WP_Error` with `status` + `retryable`.
+- `includes/class-dyc-briox-sync.php`: triggers `dyc_b2b_customer_registered`, `woocommerce_customer_save_address`, `personal_options_update`, `edit_user_profile_update` → Action Scheduler (`dyc_briox_sync_customer`, group `dyc-briox`). Retries after 1m/5m/30m/2h/12h. User meta: `_dyc_briox_customer_id`, `_dyc_briox_sync` (status), `_dyc_briox_attempts`, `_dyc_briox_create_pending` (lost-response guard). Defaults via filter `dyc_briox_customer_defaults`. Profile section with a "Synka till Briox nu" button; log source `dyc-briox`.
 
 ## Phase 4: Test against the test account
-- [ ] 4.1 New company registers → customer created in Briox with all fields; Briox ID saved in WordPress
-- [ ] 4.2 Company already exists in Briox → linked, no duplicate
+- [x] 4.1 New company registers → customer created in Briox with all fields; Briox ID saved in WordPress
+- [x] 4.2 Company (org.nr) already exists in Briox for another user → a **new** Briox customer is created (decision 2.2). Shown by 90003–90005, which all share org.nr 556012-5790
 - [ ] 4.3 No invoice email → invoices go to `billing_email`
 - [ ] 4.4 VIES down at registration → customer created with the company name as typed
-- [ ] 4.5 Briox down or token invalid → sync queued and retried, error logged, registration still succeeds
+- [x] 4.5 Briox down or token invalid → sync queued and retried, error logged, registration still succeeds
 - [ ] 4.6 Access token expired → refreshed automatically
-- [ ] 4.7 My Account edit → Briox updated (2.4 = yes); fields not edited stay intact in Briox
+- [x] 4.7 My Account edit → Briox updated (2.4 = yes); fields not edited stay intact in Briox
 - [ ] 4.8 Create an invoice in Briox for the test customer → correct org.nr, VAT number, 15-day terms, **DYC-Faktura template** (via the account default), delivered by print
-- [ ] 4.9 Delete the test data in Briox and WordPress
+- [ ] 4.9 Delete the WordPress test data (Briox test customers are kept, per the user)
+- [x] 4.10 Lost create response → retry finds the customer instead of duplicating it. **Done in a CLI test**, see the session log
+- [ ] 4.11 Token refresh through the plugin (force an expired token in the option and sync)
+
+Already covered by the 2026-10-11 tests: 4.1 (live Kadence form → Briox customer 90005 with VIES name, 15 days, list A, print, invoice email), 4.5 (simulated outage → retry in 60 s, Swedish status), 4.7 (live My Account edit → Briox updated, payment terms untouched), 4.10.
 
 ## Phase 5: Go live
+- [ ] 5.0 **Check that WP-Cron runs in production.** If `DISABLE_WP_CRON` is set there too, a server cron must call `wp-cron.php` (e.g. every minute), or syncs will wait. Check Tools → Scheduled Actions for old pending jobs.
 - [ ] 5.1 Production credentials in `wp-config.php`, `DYC_BRIOX_ENV` = `prod`. In the production Briox account: DYC-Faktura set as the account-wide default template, and payment term `15` + price list `A` exist
 - [ ] 5.2 Register one real (internal) company and verify it in Briox
 - [ ] 5.3 Watch the `dyc-briox` log for the first week
@@ -185,3 +195,4 @@ Record each answer here:
 | 2026-10-10 | Phase 1 done. Refresh rotates both tokens (old access token dies at once). Create needs the body wrapped as `{"customer": …}`; custno is optional (auto = highest + 1). Briox allows duplicate org.nrs; lookup needs the dashed format. Errors use message text only, and not-found = 400. User asked to keep the test customers (2, 90001, 90002). Next: Phase 2 decisions (user). |
 | 2026-10-10 | Phase 2: user decided 2.1 (Briox numbering), 2.2 (always a new Briox customer per WP user), 2.3 values (DYC-Faktura, 15 days, list A, print, no reminder email), 2.5 (code inside dyc-b2b-registration). Payment term `15` confirmed via `GET /payment/term`. Found that the customer's default template ("Förvalda mallar") isn't exposed by the API. Open: template approach, 2.4. |
 | 2026-10-10 | Phase 2 done: template via the account-wide default in Briox (user sets it); My Account changes update Briox (2.4 = yes). New unknown: PUT behaviour (partial vs full), test first in 3.6. Next: Phase 3 build. |
+| 2026-10-11 | Phase 3 built on branch `briox-sync` (v1.3.0). PUT is a full replace, so updates use read → merge → PUT. Tested: CLI create (90003), update keeps a Briox-side payment-term change, outage → retry, lost response → recovered 90004 without a duplicate; live Kadence registration → 90005; live My Account edit → updated; admin section renders for business users only. Found `DISABLE_WP_CRON` on the dev site with no server cron (queue never runs automatically; jobs processed by hand). WP test users deleted; Briox customers 90003–90005 kept. Next: merge, remaining Phase 4 tests, check cron in production (5.0). |

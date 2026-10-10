@@ -1,11 +1,11 @@
 <?php
 /**
  * Plugin Name: DYC B2B Registration
- * Plugin URI: https://dyc.local
- * Description: Custom B2B registration features for WooCommerce with Swedish Organisationsnummer (Luhn + VIES validation), corporate email checks, and Kadence Advanced Form integration.
- * Version: 1.2.0
+ * Plugin URI: https://dockyardcomposites.com
+ * Description: Custom B2B registration features for WooCommerce with Swedish Organisationsnummer (Luhn + VIES validation), corporate email checks, Kadence Advanced Form integration and Briox customer sync.
+ * Version: 1.3.0
  * Author: DYC Development
- * Author URI: https://dyc.local
+ * Author URI: https://dockyardcomposites.com
  * Requires at least: 5.8
  * Tested up to: 6.4
  * Requires PHP: 7.4
@@ -635,6 +635,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             update_user_meta( $customer_id, 'shipping_city', $s_city );
             update_user_meta( $customer_id, 'shipping_country', $s_country );
 
+            // Let integrations (Briox sync) pick up the new business customer
+            do_action( 'dyc_b2b_customer_registered', $customer_id );
+
             // Kadence redirects straight away, so confirm the registration on the next page instead
             update_user_meta( $customer_id, '_dyc_b2b_show_welcome', 1 );
 
@@ -954,6 +957,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             update_user_meta( $customer_id, 'shipping_postcode', $s_postcode );
             update_user_meta( $customer_id, 'shipping_city', $s_city );
             update_user_meta( $customer_id, 'shipping_country', $country );
+
+            // Let integrations (Briox sync) pick up the new business customer
+            do_action( 'dyc_b2b_customer_registered', $customer_id );
 
             wp_set_current_user( $customer_id );
             wp_set_auth_cookie( $customer_id );
@@ -1291,3 +1297,8 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
     // Initialize the plugin
     DYC_B2B_Registration::get_instance();
 }
+
+// Briox customer sync
+require_once DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-client.php';
+require_once DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-sync.php';
+DYC_Briox_Sync::get_instance();

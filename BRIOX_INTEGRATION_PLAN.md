@@ -4,7 +4,7 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
 
 **How to use this file:** This file lives in the `dyc-b2b-registration` plugin folder (versioned in its git repo). Check off steps as they are completed and add a line to the [Session log](#session-log). To resume in a new session, ask Claude to read this file and continue from the first unchecked step.
 
-**Status:** Phase 0, waiting on prerequisites (last updated 2026-10-10)
+**Status:** Phase 2 done; next is Phase 3 (build) (last updated 2026-10-10)
 
 ---
 
@@ -34,18 +34,19 @@ The Swedish API is the Finnish one plus Swedish-only features (Skatteverket, Kiv
 ### Authentication
 1. In Briox, an admin goes to **Admin → Users → External Applications**, activates the integration and generates an **authentication token**. The **client ID** appears to be the Briox account number. (Help-center guides: [eTasku](https://help.briox.fi/hc/en-us/articles/360023073411-Getting-started-with-eTasku), [Hillava](https://help.briox.fi/hc/en-us/articles/360016834019-Activate-the-Hillava-Integration).)
 2. `POST /token?clientid=…&token=…` returns `access_token`, `refresh_token`, `expire_date`, `expire_timestamp`.
-3. Send the access token in the `Authorization` header (the exact format, raw token or `Bearer …`, is still unknown).
-4. `POST /tokenrefresh?refreshtoken=…&token=…` returns a new access token.
+3. Send the access token in the `Authorization` header as the **raw token** (no `Bearer ` prefix). Verified 2026-10-10.
+4. `POST /tokenrefresh?refreshtoken=…&token=…` returns a **new access token AND a new refresh token**. The old access token stops working immediately (401). Save the new pair at once, and allow only one refresh at a time (lock), or a parallel request can end up with a dead token.
+5. **Request bodies must wrap the object:** `{"customer": {...}}`. A bare object gives `400 "Invalid data in request."`, and a form-encoded body gives `400 "Request must be valid json"`.
 
 ### Customer endpoints
 | Method | Path | Use |
 |---|---|---|
-| GET | `/customer?companynumber=…&page=&limit=` | Look up a customer by org.nr (duplicate check) |
+| GET | `/customer?companynumber=…&page=&limit=` | Look up a customer by org.nr (duplicate check). **Exact match on the dashed format** `556012-5790`; `5560125790` finds nothing |
 | POST | `/customer` | Create |
-| GET | `/customer/{id}` | Read |
+| GET | `/customer/{id}` | Read. **`{id}` is the customer number (`custno`)**; the list response has no separate `id` field |
 | PUT | `/customer/{id}` | Update |
 | DELETE | `/customer/{id}` | Delete (test cleanup) |
-| GET | `/customer/email/{email}` | Look up a customer by email |
+| GET | `/customer/email/{email}` | Look up a customer by email. Returns `data.customer` as an **array** (several possible); not found = `400 "Customer missing!"` |
 
 ### Field mapping (draft)
 Required fields in Briox: `custno` and `name`.
@@ -57,74 +58,103 @@ Required fields in Briox: `custno` and `name`.
 | `SE` + org.nr digits + `01` | `vatnumber` |
 | fixed value `1` (company) | `customerbusinesstype` |
 | `billing_email` | `email` |
-| `billing_invoice_email`, falling back to `billing_email` | `edocument: [{type: "invoice", email}]` + `invoicedocumentdeliverymethod: "03"` (email) |
+| `billing_invoice_email`, falling back to `billing_email` | `edocument: [{type: "invoice", email, cc: "", bcc: ""}]` only (**no reminder email**, per 2.3) |
+| fixed value | `invoicedocumentdeliverymethod: "00"` (**print**, per 2.3) |
 | `billing_phone` | `phone` |
 | first and last name | `customerref` |
-| billing and shipping address | `address[]`: `type`, `addressline1`, `addressline2`, `zip`, `city`, `countrycode` |
+| billing address | `address[]` entry with `type: "invoice"`: `addressline1`, `addressline2`, `zip`, `city`, `countrycode` (`SE`) |
+| shipping address | `address[]` entry with `type: "delivery"`: `name`, `addressline1`, `addressline2`, `zip`, `city`, `countrycode`; plus top-level `deliveryname` |
 | fixed value | `customertype: 0` (domestic VAT) |
 | fixed value | `currency: "SEK"` |
-| from account settings | `paymentterms` (key must exist in the Briox account) |
-| **to decide** | `custno` |
+| fixed value | `paymentterms: "15"` (15 days; ids from `GET /payment/term`: 0, 15, 20, 30, AG, K, PF) |
+| fixed value | `pricelist: "A"` |
+| **not possible via API** | Invoice template "DYC-Faktura" (customer card → "Förvalda mallar"); see 2.3 |
+| omit (recommended, see 2.1) | `custno`: Briox assigns highest existing + 1 |
 
 ### Unknowns (answer in Phase 1)
-- [ ] Valid values for `address[].type` (billing / delivery / visiting?)
-- [ ] Does Briox assign `custno` automatically if it is omitted?
-- [ ] `Authorization` header format: raw token or `Bearer <token>`?
-- [ ] Access token lifetime and refresh-token behaviour
-- [ ] Org.nr format Briox expects in `companynumber` (`5560125790` or `556012-5790`)
-- [ ] Error response format (400/401/404)
+- [x] Valid values for `address[].type`: **`invoice`** and **`delivery`** (the delivery entry also has `name`)
+- [x] Does Briox assign `custno` automatically if it is omitted? **Yes: highest existing number + 1.** Creating `90001` manually made the next automatic number `90002`, so manual high numbers move the whole sequence
+- [x] `Authorization` header format: **raw token** works (`Authorization: <access_token>`)
+- [x] Access token lifetime and refresh-token behaviour: lifetime is **30 days** (`expire_timestamp`); refresh rotates both tokens and invalidates the old access token immediately
+- [x] Org.nr format in `companynumber`: Briox stores **`NNNNNN-NNNN`** (e.g. `559104-3673`), the same as our `billing_orgnr`. `vatnumber` = `SE` + 10 digits + `01`
+- [x] Error response format: always `{"error":["<message>"],"error_code":[],"data":null}`. `error_code` is empty, so errors can only be told apart by the message text. **Not-found is HTTP 400, not 404.** Seen:
+  - 400 `Token(s) are invalid` (bad client ID / auth token at `/token`)
+  - 401 `Access token is invalid`
+  - 400 `Invalid data in request.` (body not wrapped in `{"customer": …}`)
+  - 400 `Request must be valid json`
+  - 400 `No name specified`
+  - 400 `The customer no already exists. Please choose another.`
+  - 400 `Customer missing!` (GET unknown custno or email)
+  - 400 `Payment method is invalid.` (unknown `paymentterms`)
 - [ ] Rate limits (not documented)
-- [ ] How to register a custom integration / get an Application ID
+- [ ] `PUT /customer/{id}` behaviour: partial update, or are fields/arrays not sent (e.g. `address[]`, `edocument[]`) wiped? Not tested in Phase 1; test first in 3.6 on a test customer
+- [x] How to register a custom integration / get an Application ID: **not needed for the test account**, since the token exchange works with only client ID + auth token. Check whether production needs anything else.
 
 ---
 
 ## Phase 0: Prerequisites (user)
 - [x] Scan the API documentation and draft this plan
-- [ ] Confirm the Briox account is Swedish (login at briox.se, not briox.fi)
-- [ ] Email apisupport@briox.se: how to register a custom integration (Application ID), and whether there are API limits
-- [ ] Test account: activate the integration under External Applications and generate an authentication token
-- [ ] Note the test account's account number (client ID)
-- [ ] Add the credentials to `wordpress/wp-config.php`:
+- [x] Confirm the Briox account is Swedish (login at briox.se, not briox.fi)
+- [x] Email apisupport@briox.se: how to register a custom integration (Application ID), and whether there are API limits
+- [x] Test account: activate the integration under External Applications and generate an authentication token
+- [x] Note the test account's account number (client ID)
+- [x] Add the credentials to `wordpress/wp-config.php`:
   ```php
   define( 'DYC_BRIOX_ENV', 'test' );           // 'test' or 'prod'
   define( 'DYC_BRIOX_CLIENT_ID', '...' );
   define( 'DYC_BRIOX_AUTH_TOKEN', '...' );
-  // define( 'DYC_BRIOX_APPLICATION_ID', '...' ); // if Briox requires one
+
   ```
 
 ## Phase 1: Explore by hand against the test account (Claude)
-- [ ] 1.1 Get an access token with `/token`; record its lifetime; test `/tokenrefresh`
-- [ ] 1.2 `GET /company/info` and `GET /customer?limit=5`; confirm the header format and response shape
-- [ ] 1.3 In the Briox web interface, create a test company customer (invoice email, invoice and delivery address, payment terms); `GET` it to learn the exact field formats
-- [ ] 1.4 `POST /customer` with and without `custno`; does Briox assign a number?
-- [ ] 1.5 `GET /customer?companynumber=` with both org.nr formats
-- [ ] 1.6 Trigger errors (missing name, duplicate `custno`, bad token); record the error format
-- [ ] 1.7 Delete all test customers
-- [ ] 1.8 Fill in the [Unknowns](#unknowns-answer-in-phase-1) above and write the findings in the [Session log](#session-log)
+- [x] 1.1 Get an access token with `/token`; record its lifetime; test `/tokenrefresh`. Token obtained (30-day lifetime) and saved in WP option `dyc_briox_tokens` (autoload off). Refresh works and rotates both tokens; the current pair is in the same option
+- [x] 1.2 `GET /company/info` and `GET /customer?limit=5`; confirm the header format and response shape. Connected to **"Dockyard Test Account"** (org.nr 559465-4047), which has 0 customers. The list response has `data.customers[]` and `data.metainformation` {current_page, limit, total_pages, total_count}
+- [x] 1.3 In the Briox web interface, create a test company customer (invoice email, invoice and delivery address, payment terms); `GET` it to learn the exact field formats. Sample: "Movx AB", custno `1`. Findings are in the field mapping and unknowns. Notes:
+  - Briox filled in `description` and `sni_codes` itself, apparently from the company register via org.nr.
+  - The list endpoint returns a **flat** address format (`address`, `zip`, `deladdress`, `delzip`, …); the detail endpoint returns the nested `address[]` array.
+  - Other values in the sample: `interestinvoicing: "1"`, `einvoice_preference: "unknown"`, `currency: "SEK"`, `customertype: "0"`.
+- [x] 1.4 `POST /customer` with and without `custno`; does Briox assign a number? Yes (see Unknowns). Notes:
+  - The draft mapping payload was stored exactly: addresses, both edocument entries, payment terms `30`, price list `A`.
+  - Unlike UI-created customers, `description` and `sni_codes` stay **empty** via the API (no company-register lookup).
+  - `order`/`quote` edocuments not sent come back with `email: null`, and their delivery methods default to `00` (print).
+  - **Briox accepts several customers with the same org.nr**; the plugin must do the duplicate check itself.
+- [x] 1.5 `GET /customer?companynumber=` with both org.nr formats: only the dashed format matches. Email lookup works too (returns an array)
+- [x] 1.6 Trigger errors (missing name, duplicate `custno`, bad token); record the error format (see Unknowns)
+- [x] 1.7 ~~Delete all test customers~~: **the user chose to keep them** for troubleshooting. Test customers in the Briox test account:
+  - `1` Movx AB (created by the user in the UI)
+  - `2` TEST API utan kundnr (API, no custno sent)
+  - `90001` TEST API med kundnr 90001 (API, custno sent)
+  - `90002` TEST API utan kundnr 2 (API, no custno, numbered after 90001)
+  - Customers 2, 90001 and 90002 all use Volvo's org.nr `556012-5790` and `@dyc-test-a.se` emails.
+  - The test account's next automatic customer number is now **90003**.
+- [x] 1.8 Fill in the [Unknowns](#unknowns-answer-in-phase-1) above and write the findings in the [Session log](#session-log). Only rate limits remain unknown
 
 ## Phase 2: Decisions (user)
-- [ ] 2.1 Customer numbering: Briox auto / own range (e.g. `50000` + WordPress user ID) / next free number
-- [ ] 2.2 Existing Briox customer with the same org.nr: link to it (recommended) or create a new one
-- [ ] 2.3 Defaults for new business customers: payment terms, invoice delivery (email), price list
-- [ ] 2.4 Should My Account changes (address, invoice email) also update Briox?
-- [ ] 2.5 Code location: separate plugin `dyc-briox-sync` (recommended) or inside `dyc-b2b-registration`
+- [x] 2.1 Customer numbering: Briox auto / own range (e.g. `50000` + WordPress user ID) / next free number. **Recommendation: Briox auto** (omit `custno`). An own high range would move Briox's automatic numbering for customers created in the UI too (see 1.4)
+- [x] 2.2 Existing Briox customer with the same org.nr: link to it (recommended) or create a new one. Briox itself does **not** prevent duplicates, so the plugin's lookup is the only protection. Also decide what to do when several matches exist
+- [x] 2.3 Defaults for new business customers: payment terms, invoice delivery (email), price list
+- [x] 2.4 Should My Account changes (address, invoice email) also update Briox?
+- [x] 2.5 Code location: separate plugin `dyc-briox-sync` (recommended) or inside `dyc-b2b-registration`
 
 Record each answer here:
-- 2.1:
-- 2.2:
-- 2.3:
-- 2.4:
-- 2.5:
+- 2.1: **Briox assigns the customer number** (omit `custno`).
+- 2.2: **One Briox customer per WordPress user.** If the org.nr already exists in Briox for another user, still create a new Briox customer, matching WooCommerce, where only the username is unique. Store the Briox custno on the WP user (`_dyc_briox_customer_id`); a user with a stored custno is never created again (retries and later syncs update that customer). No org.nr lookup is needed for linking.
+- 2.3: **Template "DYC-Faktura"**, payment terms **15 days**, price list **A**, invoices by **print** (`00`), **no reminder email** (don't fill the reminder edocument).
+  - The template can't be set via the API. The customer card's "Förvalda mallar" setting doesn't appear in `GET /customer/{id}` (verified: user set DYC-Faktura on customer 2; nothing in the response changed except null → ""), and neither the Customer nor the CustomerInvoice schema has a template field.
+  - Options: (a) make DYC-Faktura the account-wide default template in Briox settings (recommended, no code needed); (b) ask apisupport@briox.se whether there's an undocumented field for the customer's default template.
+  - Decision: **(a)**. The user sets DYC-Faktura as the account-wide default template in Briox (test and production). No code needed.
+- 2.4: **Yes.** When a business customer saves their billing/shipping address (incl. company, invoice email) in My Account, update their Briox customer (`PUT /customer/{custno}`). The org.nr is locked, so it never changes. Users without a stored custno get created instead.
+- 2.5: **Inside `dyc-b2b-registration`** (not a separate plugin). Phase 3 steps adjusted accordingly.
 
 ## Phase 3: Build (Claude)
-- [ ] 3.1 Create the `dyc-briox-sync` plugin and its git repo; read credentials from the `wp-config.php` constants
-- [ ] 3.2 Registration plugin: fire `do_action( 'dyc_b2b_customer_registered', $customer_id )` after the account is created (Kadence and shortcode handlers)
+- [ ] 3.1 Add a Briox module to `dyc-b2b-registration` (per 2.5, e.g. `includes/class-dyc-briox-*.php`); read credentials from the `wp-config.php` constants
+- [ ] 3.2 Fire `do_action( 'dyc_b2b_customer_registered', $customer_id )` after the account is created (Kadence and shortcode handlers); the Briox module hooks into it
 - [ ] 3.3 API client: get, store and refresh tokens; timeouts; retry temporary errors; log to the WooCommerce logger (source `dyc-briox`)
 - [ ] 3.4 Mapper: WordPress user → Briox `customer` object (see the field mapping)
-- [ ] 3.5 Background sync with Action Scheduler: look up by org.nr → link or create → save `_dyc_briox_customer_id` on the user; retry on failure
-- [ ] 3.6 Update sync on My Account changes (if 2.4 = yes): `woocommerce_customer_save_address` → `PUT /customer/{id}`
+- [ ] 3.5 Background sync with Action Scheduler: if the user has `_dyc_briox_customer_id`, update; otherwise create (no org.nr linking, per 2.2) and save the returned custno; retry on failure. Watch for a lost response after a successful create, which would cause a duplicate on retry (e.g. check `GET /customer/email/{email}` before re-creating)
+- [ ] 3.6 Update sync on My Account changes (2.4 = yes): `woocommerce_customer_save_address` → queue `PUT /customer/{custno}`. First test PUT behaviour on a test customer (partial vs full replace, see Unknowns) and send the full object if needed. Possibly also sync on admin edits of a business user (`profile_update`)
 - [ ] 3.7 Admin: Briox customer number and sync status on the user profile, plus a "Sync now" button
-- [ ] 3.8 README for the new plugin
+- [ ] 3.8 Update the plugin README (Briox section)
 
 ## Phase 4: Test against the test account
 - [ ] 4.1 New company registers → customer created in Briox with all fields; Briox ID saved in WordPress
@@ -133,12 +163,12 @@ Record each answer here:
 - [ ] 4.4 VIES down at registration → customer created with the company name as typed
 - [ ] 4.5 Briox down or token invalid → sync queued and retried, error logged, registration still succeeds
 - [ ] 4.6 Access token expired → refreshed automatically
-- [ ] 4.7 My Account edit → Briox updated (if 2.4 = yes)
-- [ ] 4.8 Create an invoice in Briox for the test customer → addressed to the invoice email, with correct org.nr and VAT number
+- [ ] 4.7 My Account edit → Briox updated (2.4 = yes); fields not edited stay intact in Briox
+- [ ] 4.8 Create an invoice in Briox for the test customer → correct org.nr, VAT number, 15-day terms, **DYC-Faktura template** (via the account default), delivered by print
 - [ ] 4.9 Delete the test data in Briox and WordPress
 
 ## Phase 5: Go live
-- [ ] 5.1 Production credentials in `wp-config.php`, `DYC_BRIOX_ENV` = `prod`
+- [ ] 5.1 Production credentials in `wp-config.php`, `DYC_BRIOX_ENV` = `prod`. In the production Briox account: DYC-Faktura set as the account-wide default template, and payment term `15` + price list `A` exist
 - [ ] 5.2 Register one real (internal) company and verify it in Briox
 - [ ] 5.3 Watch the `dyc-briox` log for the first week
 - [ ] 5.4 Decide whether existing business customers should be synced once in bulk
@@ -150,3 +180,8 @@ Record each answer here:
 | Date | What happened |
 |---|---|
 | 2026-10-10 | Scanned the Briox API (the FI link given; found and chose the SE API). Drafted this plan. Next: Phase 0 (user). |
+| 2026-10-10 | Phase 0 done by the user. First token test failed (`400 Token(s) are invalid`, wrong client ID; use the number under "Your account"); after the user corrected the client ID it worked. Access token (30 days) saved in WP option `dyc_briox_tokens`. Raw-token Authorization header confirmed. Next: 1.1 refresh test, then 1.3 (user creates a sample customer in the Briox UI). |
+| 2026-10-10 | 1.3 done: read the user's sample customer "Movx AB" (custno 1). Address types are `invoice`/`delivery`; org.nr is dashed; customer ID in URLs = custno; payment terms `30`, price list `A`. Next: 1.1 refresh test, 1.4–1.7 (create/lookup/errors/cleanup via API). |
+| 2026-10-10 | Phase 1 done. Refresh rotates both tokens (old access token dies at once). Create needs the body wrapped as `{"customer": …}`; custno is optional (auto = highest + 1). Briox allows duplicate org.nrs; lookup needs the dashed format. Errors use message text only, and not-found = 400. User asked to keep the test customers (2, 90001, 90002). Next: Phase 2 decisions (user). |
+| 2026-10-10 | Phase 2: user decided 2.1 (Briox numbering), 2.2 (always a new Briox customer per WP user), 2.3 values (DYC-Faktura, 15 days, list A, print, no reminder email), 2.5 (code inside dyc-b2b-registration). Payment term `15` confirmed via `GET /payment/term`. Found that the customer's default template ("Förvalda mallar") isn't exposed by the API. Open: template approach, 2.4. |
+| 2026-10-10 | Phase 2 done: template via the account-wide default in Briox (user sets it); My Account changes update Briox (2.4 = yes). New unknown: PUT behaviour (partial vs full), test first in 3.6. Next: Phase 3 build. |

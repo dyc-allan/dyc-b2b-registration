@@ -11,6 +11,10 @@
  *   access token at once, so refreshes are serialized with a database lock.
  * - Errors are {"error":["<message>"],"error_code":[],"data":null}; only the message tells them
  *   apart, and "not found" is HTTP 400 "Customer missing!".
+ * - The authentication token from wp-config.php can only be exchanged ONCE. After that the connection
+ *   lives on refreshes alone, so a daily keep-alive refreshes well before expiry (DYC_Briox_Sync), and
+ *   a broken chain is reported in WP-Admin (option dyc_briox_connection_error) until a new
+ *   authentication token is put in wp-config.php.
  */
 
 if ( ! defined( 'ABSPATH' ) ) {
@@ -24,9 +28,10 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
         const BASE_URL     = 'https://api-se.briox.services/v2';
         const TOKEN_OPTION = 'dyc_briox_tokens';
         const LOCK_NAME    = 'dyc_briox_token_refresh';
+        const ERROR_OPTION = 'dyc_briox_connection_error';
 
-        // Refresh this long before the access token expires
-        const REFRESH_MARGIN = DAY_IN_SECONDS;
+        // Refresh this long before the access token expires (the daily keep-alive gets several chances)
+        const REFRESH_MARGIN = 3 * DAY_IN_SECONDS;
 
         /**
          * Are the wp-config.php credentials present?
@@ -67,6 +72,11 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
                     return $token;
                 }
                 $result = $this->raw_request( $method, $path, $body, $token );
+            }
+
+            // Any successful call proves the connection works again
+            if ( ! is_wp_error( $result ) && false !== get_option( self::ERROR_OPTION ) ) {
+                delete_option( self::ERROR_OPTION );
             }
 
             return $result;
@@ -226,16 +236,49 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
                 }
 
                 if ( is_wp_error( $renewed ) ) {
+                    // Refresh and exchange both failed: the connection needs a new authentication token
+                    update_option(
+                        self::ERROR_OPTION,
+                        array(
+                            'message'     => $renewed->get_error_message(),
+                            'credentials' => $this->credentials_hash(),
+                            'time'        => time(),
+                        ),
+                        false
+                    );
                     return $renewed;
                 }
                 if ( empty( $renewed['access_token'] ) ) {
                     return new WP_Error( 'dyc_briox_token', 'Briox returned no access token.', array( 'status' => 0, 'retryable' => true ) );
                 }
 
+                delete_option( self::ERROR_OPTION );
                 return $this->save_tokens( $renewed )['access_token'];
             } finally {
                 $this->release_lock();
             }
+        }
+
+        /**
+         * The stored connection error, if it still applies to the configured credentials
+         * (a new authentication token in wp-config.php clears it on the next attempt).
+         *
+         * @return array|null { message, time }
+         */
+        public function connection_error() {
+            $error = get_option( self::ERROR_OPTION );
+            if ( ! is_array( $error ) || ! self::is_configured() ) {
+                return null;
+            }
+            return ( $error['credentials'] ?? '' ) === $this->credentials_hash() ? $error : null;
+        }
+
+        /**
+         * Expiry time of the stored access token (0 if none)
+         */
+        public function token_expiry() {
+            $tokens = $this->load_tokens();
+            return isset( $tokens['expire_timestamp'] ) ? (int) $tokens['expire_timestamp'] : 0;
         }
 
         private function acquire_lock() {

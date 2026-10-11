@@ -22,8 +22,9 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
 
     class DYC_Briox_Sync {
 
-        const HOOK  = 'dyc_briox_sync_customer';
-        const GROUP = 'dyc-briox';
+        const HOOK            = 'dyc_briox_sync_customer';
+        const KEEP_ALIVE_HOOK = 'dyc_briox_keep_token_alive';
+        const GROUP           = 'dyc-briox';
 
         const META_CUSTNO   = '_dyc_briox_customer_id';
         const META_STATUS   = '_dyc_briox_sync';
@@ -56,6 +57,11 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
 
             // Worker (Action Scheduler)
             add_action( self::HOOK, array( $this, 'run_scheduled_sync' ) );
+
+            // Daily token keep-alive: the auth token can't be exchanged again, so the refresh chain must not lapse
+            add_action( 'action_scheduler_init', array( $this, 'schedule_keep_alive' ) );
+            add_action( self::KEEP_ALIVE_HOOK, array( $this, 'keep_token_alive' ) );
+            add_action( 'admin_notices', array( $this, 'render_connection_notice' ) );
 
             // Admin: status on the user profile + "Sync now"
             add_action( 'show_user_profile', array( $this, 'render_profile_section' ), 30 );
@@ -129,6 +135,48 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                 self::log( 'error', sprintf( 'User %d: giving up after %d attempts: %s', $user_id, $attempts, $result->get_error_message() ) );
             }
             // Non-retryable errors already got their status in sync_user()
+        }
+
+        /* ------------------------------------------------------------------
+         * Token keep-alive
+         * ------------------------------------------------------------------ */
+
+        public function schedule_keep_alive() {
+            if ( ! DYC_Briox_Client::is_configured() || ! function_exists( 'as_schedule_recurring_action' ) ) {
+                return;
+            }
+            if ( ! as_has_scheduled_action( self::KEEP_ALIVE_HOOK, array(), self::GROUP ) ) {
+                as_schedule_recurring_action( time() + HOUR_IN_SECONDS, DAY_IN_SECONDS, self::KEEP_ALIVE_HOOK, array(), self::GROUP );
+            }
+        }
+
+        /**
+         * Refreshes the access token when it is within the client's refresh margin (3 days)
+         */
+        public function keep_token_alive() {
+            $token = $this->client->get_access_token();
+            if ( is_wp_error( $token ) ) {
+                self::log( 'error', 'Token keep-alive failed: ' . $token->get_error_message() );
+            }
+        }
+
+        /**
+         * Tell administrators when the Briox connection is broken and how to fix it
+         */
+        public function render_connection_notice() {
+            if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                return;
+            }
+            $error = $this->client->connection_error();
+            if ( ! $error ) {
+                return;
+            }
+            printf(
+                '<div class="notice notice-error"><p><strong>%s</strong> %s</p><p>%s</p></div>',
+                esc_html__( 'Briox-anslutningen fungerar inte.', 'dyc-b2b-registration' ),
+                esc_html( sprintf( __( 'Fel sedan %1$s: %2$s', 'dyc-b2b-registration' ), wp_date( 'Y-m-d H:i', (int) $error['time'] ), $error['message'] ) ),
+                esc_html__( 'Nya företagskunder synkas inte till Briox. Generera en ny autentiseringstoken i Briox (Admin → Användare → Externa applikationer) och ersätt DYC_BRIOX_AUTH_TOKEN i wp-config.php. Synka sedan berörda kunder med knappen "Synka till Briox nu" på användarens profil.', 'dyc-b2b-registration' )
+            );
         }
 
         /* ------------------------------------------------------------------

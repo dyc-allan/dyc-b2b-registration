@@ -85,6 +85,10 @@ define( 'DYC_BRIOX_AUTH_TOKEN', '...' ); // Admin -> Users -> External Applicati
 
 The plugin exchanges these for an access token (valid 30 days) and refreshes it automatically. Tokens are stored in the option `dyc_briox_tokens`. Changing the credentials (e.g. test to prod) makes the plugin fetch new tokens.
 
+**The authentication token can only be exchanged once.** After that the connection lives on refreshes alone, so:
+- A daily background job (`dyc_briox_keep_token_alive`) refreshes the access token when it has less than 3 days left, even if no customers register.
+- If the connection breaks anyway (refresh and exchange both fail), administrators see a red notice in WP-Admin. To fix it: generate a new authentication token in Briox (Admin → Users → External Applications), replace `DYC_BRIOX_AUTH_TOKEN` in `wp-config.php`, then sync affected customers with "Synka till Briox nu".
+
 ### What is synced
 
 | When | What happens |

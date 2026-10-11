@@ -4,7 +4,7 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
 
 **How to use this file:** This file lives in the `dyc-b2b-registration` plugin folder (versioned in its git repo). Check off steps as they are completed and add a line to the [Session log](#session-log). To resume in a new session, ask Claude to read this file and continue from the first unchecked step.
 
-**Status:** Phase 3 built and tested on branch `briox-sync` (not merged yet). Next: Phase 4 tests (last updated 2026-10-11)
+**Status:** Phase 4 done; next is Phase 5 (go live, user) (last updated 2026-10-11)
 
 ---
 
@@ -36,8 +36,9 @@ The Swedish API is the Finnish one plus Swedish-only features (Skatteverket, Kiv
 1. In Briox, an admin goes to **Admin → Users → External Applications**, activates the integration and generates an **authentication token**. The **client ID** appears to be the Briox account number. (Help-center guides: [eTasku](https://help.briox.fi/hc/en-us/articles/360023073411-Getting-started-with-eTasku), [Hillava](https://help.briox.fi/hc/en-us/articles/360016834019-Activate-the-Hillava-Integration).)
 2. `POST /token?clientid=…&token=…` returns `access_token`, `refresh_token`, `expire_date`, `expire_timestamp`.
 3. Send the access token in the `Authorization` header as the **raw token** (no `Bearer ` prefix). Verified 2026-10-10.
-4. `POST /tokenrefresh?refreshtoken=…&token=…` returns a **new access token AND a new refresh token**. The old access token stops working immediately (401). Save the new pair at once, and allow only one refresh at a time (lock), or a parallel request can end up with a dead token.
-5. **Request bodies must wrap the object:** `{"customer": {...}}`. A bare object gives `400 "Invalid data in request."`, and a form-encoded body gives `400 "Request must be valid json"`.
+4. **The authentication token can only be exchanged once** (a second `/token` call with it gives `400 Token(s) are invalid`, verified 2026-10-11). After that the connection lives on refreshes; if the chain breaks, a new auth token must be generated in Briox and put in wp-config.php.
+5. `POST /tokenrefresh?refreshtoken=…&token=…` returns a **new access token AND a new refresh token**. The old access token stops working immediately (401). Save the new pair at once, and allow only one refresh at a time (lock), or a parallel request can end up with a dead token.
+6. **Request bodies must wrap the object:** `{"customer": {...}}`. A bare object gives `400 "Invalid data in request."`, and a form-encoded body gives `400 "Request must be valid json"`.
 
 ### Customer endpoints
 | Method | Path | Use |
@@ -164,20 +165,22 @@ Record each answer here:
 ## Phase 4: Test against the test account
 - [x] 4.1 New company registers → customer created in Briox with all fields; Briox ID saved in WordPress
 - [x] 4.2 Company (org.nr) already exists in Briox for another user → a **new** Briox customer is created (decision 2.2). Shown by 90003–90005, which all share org.nr 556012-5790
-- [ ] 4.3 No invoice email → invoices go to `billing_email`
-- [ ] 4.4 VIES down at registration → customer created with the company name as typed
+- [x] 4.3 No invoice email → invoices go to `billing_email`
+- [x] 4.4 VIES down at registration → customer created with the company name as typed
 - [x] 4.5 Briox down or token invalid → sync queued and retried, error logged, registration still succeeds
-- [ ] 4.6 Access token expired → refreshed automatically
+- [x] 4.6 Access token expired → refreshed automatically
 - [x] 4.7 My Account edit → Briox updated (2.4 = yes); fields not edited stay intact in Briox
-- [ ] 4.8 Create an invoice in Briox for the test customer → correct org.nr, VAT number, 15-day terms, **DYC-Faktura template** (via the account default), delivered by print
-- [ ] 4.9 Delete the WordPress test data (Briox test customers are kept, per the user)
+- [x] 4.8 Create an invoice in Briox for the test customer → correct org.nr, VAT number, 15-day terms, **DYC-Faktura template** (via the account default), delivered by print
+- [x] 4.9 Delete the WordPress test data (Briox test customers are kept, per the user)
 - [x] 4.10 Lost create response → retry finds the customer instead of duplicating it. **Done in a CLI test**, see the session log
-- [ ] 4.11 Token refresh through the plugin (force an expired token in the option and sync)
+- [x] 4.11 Token refresh through the plugin (force an expired token in the option and sync)
+
+Also tested 2026-10-11: 4.3 + 4.4 in one live registration with VIES blocked and no invoice email → Briox 90006 with the typed company name, invoice edocument = billing_email. 4.6/4.11: token with 1 h left was refreshed; daily keep-alive refreshes at 2 days left but not at 5; broken chain shows the WP-Admin notice, which disappears after recovery. 4.8 done by the user (invoice with DYC-Faktura, 15 days, print).
 
 Already covered by the 2026-10-11 tests: 4.1 (live Kadence form → Briox customer 90005 with VIES name, 15 days, list A, print, invoice email), 4.5 (simulated outage → retry in 60 s, Swedish status), 4.7 (live My Account edit → Briox updated, payment terms untouched), 4.10.
 
 ## Phase 5: Go live
-- [ ] 5.0 **Check that WP-Cron runs in production.** If `DISABLE_WP_CRON` is set there too, a server cron must call `wp-cron.php` (e.g. every minute), or syncs will wait. Check Tools → Scheduled Actions for old pending jobs.
+- [x] 5.0 **Check that WP-Cron runs in production.** Confirmed by the user: a server cron job runs in production. If `DISABLE_WP_CRON` is set there too, a server cron must call `wp-cron.php` (e.g. every minute), or syncs will wait. Check Tools → Scheduled Actions for old pending jobs.
 - [ ] 5.1 Production credentials in `wp-config.php`, `DYC_BRIOX_ENV` = `prod`. In the production Briox account: DYC-Faktura set as the account-wide default template, and payment term `15` + price list `A` exist
 - [ ] 5.2 Register one real (internal) company and verify it in Briox
 - [ ] 5.3 Watch the `dyc-briox` log for the first week
@@ -196,3 +199,4 @@ Already covered by the 2026-10-11 tests: 4.1 (live Kadence form → Briox custom
 | 2026-10-10 | Phase 2: user decided 2.1 (Briox numbering), 2.2 (always a new Briox customer per WP user), 2.3 values (DYC-Faktura, 15 days, list A, print, no reminder email), 2.5 (code inside dyc-b2b-registration). Payment term `15` confirmed via `GET /payment/term`. Found that the customer's default template ("Förvalda mallar") isn't exposed by the API. Open: template approach, 2.4. |
 | 2026-10-10 | Phase 2 done: template via the account-wide default in Briox (user sets it); My Account changes update Briox (2.4 = yes). New unknown: PUT behaviour (partial vs full), test first in 3.6. Next: Phase 3 build. |
 | 2026-10-11 | Phase 3 built on branch `briox-sync` (v1.3.0). PUT keeps the customer/custno but clears every field not sent, so updates use read → merge → PUT. Tested: CLI create (90003), update keeps a Briox-side payment-term change, outage → retry, lost response → recovered 90004 without a duplicate; live Kadence registration → 90005; live My Account edit → updated; admin section renders for business users only. Found `DISABLE_WP_CRON` on the dev site with no server cron (queue never runs automatically; jobs processed by hand). WP test users deleted; Briox customers 90003–90005 kept. Next: merge, remaining Phase 4 tests, check cron in production (5.0). |
+| 2026-10-11 | Merged `briox-sync`. Found that the auth token can only be exchanged once, so added (branch `briox-token-keepalive`) a daily keep-alive refresh (3-day margin) and a WP-Admin notice when the connection breaks. Tested 4.3, 4.4, 4.6/4.11; user did 4.8 and confirmed a server cron in production (5.0). Briox test customer 90006 added (kept). Phase 4 complete. Next: Phase 5 go-live (user). |

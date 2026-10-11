@@ -3,7 +3,7 @@
  * Plugin Name: DYC B2B Registration
  * Plugin URI: https://dockyardcomposites.com
  * Description: Custom B2B registration features for WooCommerce with Swedish Organisationsnummer (Luhn + VIES validation), corporate email checks, Kadence Advanced Form integration and Briox customer sync.
- * Version: 1.3.0
+ * Version: 1.4.0
  * Author: DYC Development
  * Author URI: https://dockyardcomposites.com
  * Requires at least: 5.8
@@ -133,6 +133,8 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
          * Hide company, org.nr, and invoice email fields for retail customers & guests on standard checkout/my-account
          */
         public function filter_billing_fields_by_role( $fields ) {
+            $fields = $this->ensure_b2b_billing_fields( $fields );
+
             if ( is_admin() && ! wp_doing_ajax() ) {
                 return $fields;
             }
@@ -159,6 +161,37 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 $fields['billing_orgnr']['description'] = __( 'Organisationsnumret kan inte ändras. Kontakta oss om det behöver uppdateras.', 'dyc-b2b-registration' );
             }
 
+            return $fields;
+        }
+
+        /**
+         * Add billing_orgnr and billing_invoice_email when no other plugin defines them.
+         * Definitions from e.g. Kadence Woo Extras' checkout editor are kept as they are.
+         */
+        private function ensure_b2b_billing_fields( $fields ) {
+            if ( ! is_array( $fields ) ) {
+                return $fields;
+            }
+            if ( ! isset( $fields['billing_orgnr'] ) ) {
+                $fields['billing_orgnr'] = array(
+                    'label'    => __( 'Organisationsnr', 'dyc-b2b-registration' ),
+                    'type'     => 'text',
+                    'required' => false,
+                    'class'    => array( 'form-row-wide' ),
+                    'priority' => 35, // after company name
+                );
+            }
+            if ( ! isset( $fields['billing_invoice_email'] ) ) {
+                $fields['billing_invoice_email'] = array(
+                    'label'        => __( 'Faktura email', 'dyc-b2b-registration' ),
+                    'type'         => 'email',
+                    'validate'     => array( 'email' ),
+                    'required'     => false,
+                    'autocomplete' => 'email',
+                    'class'        => array( 'form-row-wide' ),
+                    'priority'     => 115, // after email address
+                );
+            }
             return $fields;
         }
 
@@ -1299,6 +1332,20 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
 }
 
 // Briox customer sync
+require_once DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-settings.php';
 require_once DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-client.php';
 require_once DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-sync.php';
 DYC_Briox_Sync::get_instance();
+
+// WooCommerce → Settings → Briox
+add_filter(
+    'woocommerce_get_settings_pages',
+    function ( $pages ) {
+        static $page = null;
+        if ( null === $page ) {
+            $page = require DYC_B2B_REGISTRATION_PLUGIN_PATH . 'includes/class-dyc-briox-settings-page.php';
+        }
+        $pages[] = $page;
+        return $pages;
+    }
+);

@@ -6,7 +6,8 @@
  * - One Briox customer per WordPress user, even if the org.nr already exists in Briox.
  *   The Briox customer number is stored in user meta and the user is never created twice.
  * - Briox assigns the customer number.
- * - New customers get 15-day payment terms, price list A, invoices by print and no reminder email.
+ * - New customers get the payment terms from the settings (default 15 days), price list A, invoices
+ *   by print and no reminder email.
  *   The invoice template (DYC-Faktura) is the Briox account default; the API can't set it.
  * - My Account address changes update the Briox customer.
  *
@@ -167,15 +168,36 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
             if ( ! current_user_can( 'manage_woocommerce' ) ) {
                 return;
             }
+            // Don't repeat the warning on the Briox settings tab itself, which shows the status
+            if ( isset( $_GET['page'], $_GET['tab'] ) && 'wc-settings' === $_GET['page'] && 'dyc_briox' === $_GET['tab'] ) {
+                return;
+            }
+
+            if ( DYC_Briox_Settings::site_mismatch() ) {
+                printf(
+                    '<div class="notice notice-warning"><p><strong>%s</strong> %s <a href="%s">%s</a></p></div>',
+                    esc_html__( 'Briox är inte anslutet på den här webbplatsen.', 'dyc-b2b-registration' ),
+                    esc_html__( 'Briox-uppgifterna sparades på en annan webbplats (t.ex. en kopia av databasen) och används inte här.', 'dyc-b2b-registration' ),
+                    esc_url( DYC_Briox_Settings::settings_url() ),
+                    esc_html__( 'Briox-inställningar', 'dyc-b2b-registration' )
+                );
+                return;
+            }
+
             $error = $this->client->connection_error();
             if ( ! $error ) {
                 return;
             }
+            $where = 'wp-config' === DYC_Briox_Settings::credentials()['source']
+                ? __( 'ersätt DYC_BRIOX_AUTH_TOKEN i wp-config.php', 'dyc-b2b-registration' )
+                : __( 'ange den under WooCommerce → Inställningar → Briox', 'dyc-b2b-registration' );
             printf(
-                '<div class="notice notice-error"><p><strong>%s</strong> %s</p><p>%s</p></div>',
+                '<div class="notice notice-error"><p><strong>%s</strong> %s</p><p>%s <a href="%s">%s</a></p></div>',
                 esc_html__( 'Briox-anslutningen fungerar inte.', 'dyc-b2b-registration' ),
                 esc_html( sprintf( __( 'Fel sedan %1$s: %2$s', 'dyc-b2b-registration' ), wp_date( 'Y-m-d H:i', (int) $error['time'] ), $error['message'] ) ),
-                esc_html__( 'Nya företagskunder synkas inte till Briox. Generera en ny autentiseringstoken i Briox (Admin → Användare → Externa applikationer) och ersätt DYC_BRIOX_AUTH_TOKEN i wp-config.php. Synka sedan berörda kunder med knappen "Synka till Briox nu" på användarens profil.', 'dyc-b2b-registration' )
+                esc_html( sprintf( __( 'Nya företagskunder synkas inte till Briox. Generera en ny autentiseringstoken i Briox (Admin → Användare → Externa applikationer) och %s. Synka sedan berörda kunder med knappen "Synka till Briox nu" på användarens profil.', 'dyc-b2b-registration' ), $where ) ),
+                esc_url( DYC_Briox_Settings::settings_url() ),
+                esc_html__( 'Briox-inställningar', 'dyc-b2b-registration' )
             );
         }
 
@@ -335,7 +357,7 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                     'customerbusinesstype'          => '1',
                     'currency'                      => 'SEK',
                     'customertype'                  => 0,
-                    'paymentterms'                  => '15',
+                    'paymentterms'                  => DYC_Briox_Settings::payment_terms(), // WooCommerce → Settings → Briox
                     'pricelist'                     => 'A',
                     'invoicedocumentdeliverymethod' => '00', // print
                 )

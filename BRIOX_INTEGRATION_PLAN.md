@@ -4,7 +4,7 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
 
 **How to use this file:** This file lives in the `dyc-b2b-registration` plugin folder (versioned in its git repo). Check off steps as they are completed and add a line to the [Session log](#session-log). To resume in a new session, ask Claude to read this file and continue from the first unchecked step.
 
-**Status:** Phase 4 done; next is Phase 5 (go live, user) (last updated 2026-10-11)
+**Status:** Phase 4 done; v1.4.0 (settings page + automatic billing fields) built on branch `briox-settings`. Next: Phase 5 (go live, user) (last updated 2026-10-11)
 
 ---
 
@@ -19,7 +19,8 @@ Sync new B2B customers from the WooCommerce site to Briox (invoicing system).
 - **Git:** no global git identity is configured. Commits so far use `git -c user.name="DYC Development" -c user.email="dev@dyc.local"`. Work goes on a branch, which the user merges into `main` (fast-forward).
 - **Test data:** use fake domains such as `@dyc-test-a.se`. Delete WordPress test users afterwards, but **keep Briox test customers** (user's wish, useful for troubleshooting).
 - **WP-Cron is disabled on the dev site** (`define( 'DISABLE_WP_CRON', true );` in wp-config.php) and no server cron runs, so Action Scheduler jobs are never processed automatically here. Other plugins' jobs have been waiting since June 2026; **don't run the whole queue**. To process only a Briox sync job: `ActionScheduler::runner()->process_action( $action_id, 'manual' )` for the pending `dyc_briox_sync_customer` action, or use the "Synka till Briox nu" button on the user profile.
-- **Credentials:** never in chat or git. Put them in `wordpress/wp-config.php` as constants (see Phase 0).
+- **Credentials:** never in chat or git. Since v1.4.0 they go on **WooCommerce → Settings → Briox** (bound to the site address) or, overriding that, in `wordpress/wp-config.php` as constants. The dev site uses wp-config.php.
+- **wp-config.php is a single-file Docker bind mount.** Never replace it (e.g. `sed -i`, which writes a new file): the container keeps the deleted copy, and a restart then fails ("error mounting … wp-config.php"). Edit in place (`cat x > wp-config.php`); if it happens, `docker compose up -d --force-recreate wordpress` fixes it.
 
 ## API reference (summary)
 
@@ -200,3 +201,4 @@ Already covered by the 2026-10-11 tests: 4.1 (live Kadence form → Briox custom
 | 2026-10-10 | Phase 2 done: template via the account-wide default in Briox (user sets it); My Account changes update Briox (2.4 = yes). New unknown: PUT behaviour (partial vs full), test first in 3.6. Next: Phase 3 build. |
 | 2026-10-11 | Phase 3 built on branch `briox-sync` (v1.3.0). PUT keeps the customer/custno but clears every field not sent, so updates use read → merge → PUT. Tested: CLI create (90003), update keeps a Briox-side payment-term change, outage → retry, lost response → recovered 90004 without a duplicate; live Kadence registration → 90005; live My Account edit → updated; admin section renders for business users only. Found `DISABLE_WP_CRON` on the dev site with no server cron (queue never runs automatically; jobs processed by hand). WP test users deleted; Briox customers 90003–90005 kept. Next: merge, remaining Phase 4 tests, check cron in production (5.0). |
 | 2026-10-11 | Merged `briox-sync`. Found that the auth token can only be exchanged once, so added (branch `briox-token-keepalive`) a daily keep-alive refresh (3-day margin) and a WP-Admin notice when the connection breaks. Tested 4.3, 4.4, 4.6/4.11; user did 4.8 and confirmed a server cron in production (5.0). Briox test customer 90006 added (kept). Phase 4 complete. Next: Phase 5 go-live (user). |
+| 2026-10-11 | Built a production zip (v1.3.0) for the user. Then v1.4.0 on branch `briox-settings`: the plugin adds `billing_orgnr`/`billing_invoice_email` when no other plugin defines them; WooCommerce → Settings → Briox with status, client ID, auth token (exchanged on save, never re-displayed), environment and payment terms (from `GET /payment/term`); wp-config.php constants override it; stored credentials bound to the site address. All tested (incl. the settings path with the wp-config constants temporarily disabled). Incident during the test: `sed -i` broke the wp-config.php bind mount; the container was recreated (site down ~1 min). |

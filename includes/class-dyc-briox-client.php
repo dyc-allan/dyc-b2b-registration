@@ -2,8 +2,8 @@
 /**
  * Briox API client (Swedish API).
  *
- * Credentials come from wp-config.php constants:
- *   DYC_BRIOX_CLIENT_ID, DYC_BRIOX_AUTH_TOKEN, DYC_BRIOX_ENV ('test' or 'prod').
+ * Credentials come from DYC_Briox_Settings: wp-config.php constants (DYC_BRIOX_CLIENT_ID,
+ * DYC_BRIOX_AUTH_TOKEN, DYC_BRIOX_ENV) when defined, otherwise WooCommerce → Settings → Briox.
  *
  * API quirks this class handles (verified against the test account, see BRIOX_INTEGRATION_PLAN.md):
  * - The access token goes in the Authorization header as the raw token (no "Bearer ").
@@ -37,15 +37,15 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
          * Are the wp-config.php credentials present?
          */
         public static function is_configured() {
-            return defined( 'DYC_BRIOX_CLIENT_ID' ) && '' !== trim( (string) DYC_BRIOX_CLIENT_ID )
-                && defined( 'DYC_BRIOX_AUTH_TOKEN' ) && '' !== trim( (string) DYC_BRIOX_AUTH_TOKEN );
+            $credentials = DYC_Briox_Settings::credentials();
+            return '' !== $credentials['client_id'] && '' !== $credentials['auth_token'];
         }
 
         /**
          * 'test' or 'prod' (informational; both use the same API host)
          */
         public static function env() {
-            return defined( 'DYC_BRIOX_ENV' ) ? (string) DYC_BRIOX_ENV : 'test';
+            return DYC_Briox_Settings::credentials()['env'];
         }
 
         /**
@@ -146,7 +146,8 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
          * Hash of the configured credentials, to notice when wp-config.php changes (e.g. test -> prod)
          */
         private function credentials_hash() {
-            return md5( trim( (string) DYC_BRIOX_CLIENT_ID ) . '|' . trim( (string) DYC_BRIOX_AUTH_TOKEN ) );
+            $credentials = DYC_Briox_Settings::credentials();
+            return md5( $credentials['client_id'] . '|' . $credentials['auth_token'] );
         }
 
         /**
@@ -193,7 +194,7 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
          */
         public function get_access_token( $force_renew = false ) {
             if ( ! self::is_configured() ) {
-                return new WP_Error( 'dyc_briox_not_configured', 'Briox credentials missing in wp-config.php (DYC_BRIOX_CLIENT_ID / DYC_BRIOX_AUTH_TOKEN).', array( 'status' => 0, 'retryable' => false ) );
+                return new WP_Error( 'dyc_briox_not_configured', 'Briox-uppgifter saknas (WooCommerce → Inställningar → Briox).', array( 'status' => 0, 'retryable' => false ) );
             }
 
             $tokens = $this->load_tokens();
@@ -229,7 +230,7 @@ if ( ! class_exists( 'DYC_Briox_Client' ) ) {
                 if ( null === $renewed || is_wp_error( $renewed ) ) {
                     $renewed = $this->raw_request(
                         'POST',
-                        '/token?' . http_build_query( array( 'clientid' => trim( (string) DYC_BRIOX_CLIENT_ID ), 'token' => trim( (string) DYC_BRIOX_AUTH_TOKEN ) ) ),
+                        '/token?' . http_build_query( array( 'clientid' => DYC_Briox_Settings::credentials()['client_id'], 'token' => DYC_Briox_Settings::credentials()['auth_token'] ) ),
                         null,
                         null
                     );

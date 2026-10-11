@@ -28,7 +28,7 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
 
 ## Setup
 
-1. Add `billing_orgnr` (Organisationsnr) and `billing_invoice_email` (Faktura email) as billing fields in Kadence Woo Extras' checkout field editor. The plugin does not add these fields itself; it only controls who sees them and locks the org.nr.
+1. Billing fields `billing_orgnr` (Organisationsnr) and `billing_invoice_email` (Faktura email): **the plugin adds them automatically** if no other plugin defines them. If they are defined in e.g. Kadence Woo Extras' checkout field editor, those definitions (labels, order) are used instead.
 2. Build the registration form, either with the shortcode or as a Kadence Advanced Form (see below).
 
 ## Kadence Advanced Form Integration
@@ -75,19 +75,28 @@ Business customers (role `business`) are synced to the invoicing system Briox (S
 
 ### Configuration
 
-Add to `wp-config.php` (above the "stop editing" line):
+**WooCommerce → Settings → Briox:**
+- **Status:** which Briox account the site is connected to, token expiry, and where the credentials come from.
+- **Klient-ID:** the account number under "Your account" in Briox.
+- **Autentiseringstoken:** generated in Briox under Admin → Users → External Applications. It can only be used once, so the plugin exchanges it immediately when you save and shows whether Briox accepted it. After saving, the token is never shown again (only its last 4 characters). Changing the client ID requires a new token.
+- **Miljö:** test or production (informational).
+- **Betalningsvillkor:** payment terms for new Briox customers, listed from the Briox account (default 15 days).
+
+The stored credentials only apply on the site address they were saved on. A copy of the database on another site (dev/staging) is not connected and shows a notice instead, so it can never create customers in the live Briox account or refresh (and thereby kill) production's token.
+
+**Alternatively, `wp-config.php`** (above the "stop editing" line). These constants override the settings page, whose fields are then locked:
 
 ```php
-define( 'DYC_BRIOX_ENV', 'test' );       // 'test' or 'prod' (shown in WP-Admin)
-define( 'DYC_BRIOX_CLIENT_ID', '...' );  // account number under "Your account" in Briox
-define( 'DYC_BRIOX_AUTH_TOKEN', '...' ); // Admin -> Users -> External Applications -> generate token
+define( 'DYC_BRIOX_ENV', 'test' );       // 'test' or 'prod'
+define( 'DYC_BRIOX_CLIENT_ID', '...' );
+define( 'DYC_BRIOX_AUTH_TOKEN', '...' );
 ```
 
 The plugin exchanges these for an access token (valid 30 days) and refreshes it automatically. Tokens are stored in the option `dyc_briox_tokens`. Changing the credentials (e.g. test to prod) makes the plugin fetch new tokens.
 
 **The authentication token can only be exchanged once.** After that the connection lives on refreshes alone, so:
 - A daily background job (`dyc_briox_keep_token_alive`) refreshes the access token when it has less than 3 days left, even if no customers register.
-- If the connection breaks anyway (refresh and exchange both fail), administrators see a red notice in WP-Admin. To fix it: generate a new authentication token in Briox (Admin → Users → External Applications), replace `DYC_BRIOX_AUTH_TOKEN` in `wp-config.php`, then sync affected customers with "Synka till Briox nu".
+- If the connection breaks anyway (refresh and exchange both fail), administrators see a red notice in WP-Admin. To fix it: generate a new authentication token in Briox (Admin → Users → External Applications), enter it on the settings page (or replace `DYC_BRIOX_AUTH_TOKEN` in `wp-config.php`), then sync affected customers with "Synka till Briox nu".
 
 ### What is synced
 
@@ -97,7 +106,7 @@ The plugin exchanges these for an access token (valid 30 days) and refreshes it 
 | The customer saves an address in My Account, or an admin saves the user profile | The Briox customer is updated |
 
 - **One Briox customer per WordPress user**, even if the org.nr already exists in Briox. The Briox customer number is stored in user meta `_dyc_briox_customer_id`, and the user is never created twice.
-- **New customers get:** payment terms 15 days, price list A, invoices by print, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
+- **New customers get:** the payment terms from the settings page (default 15 days), price list A, invoices by print, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
 - **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. The customer and its number stay the same, but Briox's update overwrites all fields: any field left out of the request is cleared. So a partial update would wipe the other fields.
 - **Invoice template:** the API can't set a customer's default template. "DYC-Faktura" is set as the account-wide default template in Briox.
 
@@ -120,8 +129,7 @@ Syncs run in the background through WooCommerce's Action Scheduler (hook `dyc_br
 - WooCommerce 5.0+
 - PHP 7.4+ with cURL extension
 - Kadence Blocks (optional, for the Advanced Form integration)
-- Kadence Woo Extras checkout field editor (or another way of registering `billing_orgnr` and `billing_invoice_email` as WooCommerce billing fields)
-- For the Briox sync: Briox API credentials, and a working WP-Cron (or a server cron calling `wp-cron.php`)
+- For the Briox sync: Briox API credentials (settings page or wp-config.php), and a working WP-Cron (or a server cron calling `wp-cron.php`)
 
 ## Development
 

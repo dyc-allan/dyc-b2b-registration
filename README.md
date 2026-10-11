@@ -94,7 +94,7 @@ The plugin exchanges these for an access token (valid 30 days) and refreshes it 
 
 - **One Briox customer per WordPress user**, even if the org.nr already exists in Briox. The Briox customer number is stored in user meta `_dyc_briox_customer_id`, and the user is never created twice.
 - **New customers get:** payment terms 15 days, price list A, invoices by print, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
-- **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. Briox's update replaces the whole customer, so a partial update would wipe other fields.
+- **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. The customer and its number stay the same, but Briox's update overwrites all fields: any field left out of the request is cleared. So a partial update would wipe the other fields.
 - **Invoice template:** the API can't set a customer's default template. "DYC-Faktura" is set as the account-wide default template in Briox.
 
 ### Background processing and retries

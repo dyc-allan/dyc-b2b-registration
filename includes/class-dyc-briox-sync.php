@@ -10,7 +10,7 @@
  *   The invoice template (DYC-Faktura) is the Briox account default; the API can't set it.
  * - My Account address changes update the Briox customer.
  *
- * PUT /customer replaces the whole customer (fields not sent are cleared), so updates read the
+ * PUT /customer/{custno} updates the same customer but clears every field not sent, so updates read the
  * current customer, change only the fields this plugin owns and send the complete object back.
  */
 
@@ -357,7 +357,7 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
         }
 
         /**
-         * Overlay our fields on the customer as it is in Briox (PUT replaces the whole customer)
+         * Overlay our fields on the customer as it is in Briox (PUT clears every field not sent)
          */
         public static function merge_owned_fields( array $current, array $owned ) {
             // Read-only / informational fields Briox returns but doesn't accept

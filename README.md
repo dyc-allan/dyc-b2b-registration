@@ -50,6 +50,7 @@ Set each field's **Field Name** (the input's `name` attribute) to match the WooC
 | `billing_postcode` | Yes | |
 | `billing_city` | Yes | |
 | `billing_invoice_email` | No | Validated as an email address if filled in. |
+| `billing_einvoice` | No | Checkbox "E-Faktura" (one option, e.g. "Ja"). Any checked value counts. Stored as user meta `billing_einvoice = yes`; the Briox customer is then created with invoice delivery "Elektronisk faktura". |
 | `billing_phone` | No | |
 | `billing_address_2` | No | |
 | `billing_country` | No | Defaults to `SE`. |
@@ -106,8 +107,9 @@ The plugin exchanges these for an access token (valid 30 days) and refreshes it 
 | The customer saves an address in My Account, or an admin saves the user profile | The Briox customer is updated |
 
 - **One Briox customer per WordPress user**, even if the org.nr already exists in Briox. The Briox customer number is stored in user meta `_dyc_briox_customer_id`, and the user is never created twice.
-- **New customers get:** the payment terms from the settings page (default 15 days), price list A, invoices by print, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
+- **New customers get:** the payment terms from the settings page (default 15 days), price list A, invoices by print (`00`), or by **e-invoice (`02`, "Elektronisk faktura") if the customer ticked "E-Faktura"**, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
 - **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. The customer and its number stay the same, but Briox's update overwrites all fields: any field left out of the request is cleared. So a partial update would wipe the other fields.
+- **E-invoice not enabled in Briox:** Briox rejects `02` with `"E-Invoice/Print Service is not enabled."` (as in the test account). The plugin then creates the customer with print (`00`) and shows a warning in the user's sync status and the `dyc-briox` log; change the delivery method in Briox once e-invoicing is enabled.
 - **Invoice template:** the API can't set a customer's default template. "DYC-Faktura" is set as the account-wide default template in Briox.
 
 ### Background processing and retries

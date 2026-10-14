@@ -3,7 +3,7 @@
  * Plugin Name: DYC B2B Registration
  * Plugin URI: https://dockyardcomposites.com
  * Description: Custom B2B registration features for WooCommerce with Swedish Organisationsnummer (Luhn + VIES validation), corporate email checks, Kadence Advanced Form integration and Briox customer sync.
- * Version: 1.4.0
+ * Version: 1.5.0
  * Author: DYC Development
  * Author URI: https://dockyardcomposites.com
  * Requires at least: 5.8
@@ -638,6 +638,10 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             if ( $inv_email ) {
                 update_user_meta( $customer_id, 'billing_invoice_email', $inv_email );
             }
+            // "E-Faktura" checkbox (Field Name billing_einvoice): any checked value counts
+            if ( '' !== $get( 'billing_einvoice' ) ) {
+                update_user_meta( $customer_id, 'billing_einvoice', 'yes' );
+            }
             update_user_meta( $customer_id, 'billing_phone', $phone );
             update_user_meta( $customer_id, 'billing_address_1', $address_1 );
             if ( $address_2 ) {
@@ -977,6 +981,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             if ( $inv_email ) {
                 update_user_meta( $customer_id, 'billing_invoice_email', $inv_email );
             }
+            if ( ! empty( $_POST['billing_einvoice'] ) ) {
+                update_user_meta( $customer_id, 'billing_einvoice', 'yes' );
+            }
             update_user_meta( $customer_id, 'billing_phone', $phone );
             update_user_meta( $customer_id, 'billing_address_1', $address_1 );
             update_user_meta( $customer_id, 'billing_postcode', $postcode );
@@ -1068,6 +1075,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                             <div class="dyc-form-row">
                                 <label for="dyc_billing_invoice_email"><?php _e( 'Faktura-e-post (valfri)', 'dyc-b2b-registration' ); ?></label>
                                 <input type="email" name="billing_invoice_email" id="dyc_billing_invoice_email" placeholder="faktura@foretag.se" value="<?php echo ! empty( $_POST['billing_invoice_email'] ) ? esc_attr( $_POST['billing_invoice_email'] ) : ''; ?>" />
+                            </div>
+                            <div class="dyc-form-row">
+                                <label for="dyc_billing_einvoice">
+                                    <input type="checkbox" name="billing_einvoice" id="dyc_billing_einvoice" value="1" <?php checked( ! empty( $_POST['billing_einvoice'] ) ); ?> />
+                                    <?php _e( 'E-Faktura', 'dyc-b2b-registration' ); ?>
+                                </label>
+                                <small class="dyc-help-text"><?php _e( 'Kryssa i om ni vill få era fakturor elektroniskt.', 'dyc-b2b-registration' ); ?></small>
                             </div>
                         </div>
 

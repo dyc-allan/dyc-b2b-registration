@@ -32,6 +32,13 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
         const META_ATTEMPTS = '_dyc_briox_attempts';
         const META_PENDING  = '_dyc_briox_create_pending';
 
+        // Set when the customer ticked "E-Faktura" at registration
+        const META_EINVOICE = 'billing_einvoice';
+
+        // Briox invoice delivery methods (invoicedocumentdeliverymethod)
+        const DELIVERY_PRINT    = '00'; // Skriv ut
+        const DELIVERY_EINVOICE = '02'; // Elektronisk faktura (must be enabled in the Briox account)
+
         // Seconds to wait before retry 1, 2, 3 ... after a temporary error
         const RETRY_DELAYS = array( 60, 300, 1800, 7200, 43200 );
 
@@ -39,6 +46,9 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
 
         /** @var DYC_Briox_Client */
         private $client;
+
+        /** @var string Non-fatal note from the current sync, shown in the sync status */
+        private $sync_warning = '';
 
         public static function get_instance() {
             if ( null === self::$instance ) {
@@ -221,7 +231,8 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                 return $this->fail( $user_id, $error );
             }
 
-            $custno = (string) get_user_meta( $user_id, self::META_CUSTNO, true );
+            $custno             = (string) get_user_meta( $user_id, self::META_CUSTNO, true );
+            $this->sync_warning = '';
 
             // A previous create may have succeeded without us getting the answer: find it before creating again
             if ( '' === $custno && get_user_meta( $user_id, self::META_PENDING, true ) ) {
@@ -254,15 +265,32 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
             }
 
             delete_user_meta( $user_id, self::META_ATTEMPTS );
-            $this->set_status( $user_id, 'ok', '', $result );
+            $this->set_status( $user_id, 'ok', $this->sync_warning, $result );
             return $result;
+        }
+
+        public static function wants_einvoice( $user_id ) {
+            return 'yes' === get_user_meta( $user_id, self::META_EINVOICE, true );
         }
 
         private function create_customer( $user_id ) {
             $customer = array_merge( self::defaults(), self::owned_fields( $user_id ) );
+            if ( self::wants_einvoice( $user_id ) ) {
+                $customer['invoicedocumentdeliverymethod'] = self::DELIVERY_EINVOICE;
+            }
 
             update_user_meta( $user_id, self::META_PENDING, time() );
             $data = $this->client->request( 'POST', '/customer', array( 'customer' => $customer ) );
+
+            // E-invoicing not enabled in this Briox account ("E-Invoice/Print Service is not enabled."):
+            // create the customer with print instead of failing the whole sync
+            if ( is_wp_error( $data ) && self::DELIVERY_EINVOICE === $customer['invoicedocumentdeliverymethod']
+                && false !== stripos( $data->get_error_message(), 'not enabled' ) ) {
+                $this->sync_warning = __( 'Kunden valde E-faktura, men elektronisk faktura är inte aktiverat i Briox. Kunden skapades med "Skriv ut"; ändra leveranssättet i Briox när e-faktura är aktiverat.', 'dyc-b2b-registration' );
+                self::log( 'warning', sprintf( 'User %d: e-invoice not enabled in Briox (%s), creating with print instead', $user_id, $data->get_error_message() ) );
+                $customer['invoicedocumentdeliverymethod'] = self::DELIVERY_PRINT;
+                $data = $this->client->request( 'POST', '/customer', array( 'customer' => $customer ) );
+            }
 
             if ( is_wp_error( $data ) ) {
                 $status = $data->get_error_data()['status'] ?? 0;
@@ -359,7 +387,7 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                     'customertype'                  => 0,
                     'paymentterms'                  => DYC_Briox_Settings::payment_terms(), // WooCommerce → Settings → Briox
                     'pricelist'                     => 'A',
-                    'invoicedocumentdeliverymethod' => '00', // print
+                    'invoicedocumentdeliverymethod' => self::DELIVERY_PRINT, // '02' instead when the customer chose E-Faktura
                 )
             );
         }
@@ -508,6 +536,10 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                 <tr>
                     <th><?php esc_html_e( 'Kundnummer i Briox', 'dyc-b2b-registration' ); ?></th>
                     <td><?php echo $custno ? esc_html( $custno ) : '<em>' . esc_html__( 'Inte skapad ännu', 'dyc-b2b-registration' ) . '</em>'; ?></td>
+                </tr>
+                <tr>
+                    <th><?php esc_html_e( 'E-faktura', 'dyc-b2b-registration' ); ?></th>
+                    <td><?php echo self::wants_einvoice( $user->ID ) ? esc_html__( 'Ja, kunden vill ha elektronisk faktura', 'dyc-b2b-registration' ) : esc_html__( 'Nej', 'dyc-b2b-registration' ); ?></td>
                 </tr>
                 <tr>
                     <th><?php esc_html_e( 'Synkstatus', 'dyc-b2b-registration' ); ?></th>

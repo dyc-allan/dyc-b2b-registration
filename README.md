@@ -17,6 +17,7 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Generates a unique username from the email address (`info`, `info-2`, ...); customers log in with their email.
   - Saves all billing and shipping metadata (including `billing_orgnr` and `billing_invoice_email`).
   - Automatically logs in the new customer.
+  - Sends WordPress's standard admin "new user" email to the site admin, turned into a company summary: subject "[Site] Ny företagsregistrering: <company>", with org.nr, contact, email, phone, invoice address, invoice email, E-faktura choice, username and a link to the user in WP-Admin. Ordinary WooCommerce registrations are unaffected (WooCommerce itself sends no admin email).
   - Shows a one-time "Företaget är nu registrerat!" dialog on the page the customer is redirected to (Kadence form).
 - **Role-Based Field Visibility**:
   - `billing_company`, `billing_orgnr`, `billing_invoice_email` and `shipping_company` are shown on checkout and My Account addresses only to the `business`, `administrator` and `shop_manager` roles, and hidden from retail customers (`customer` role) and guests.
@@ -109,6 +110,7 @@ The plugin exchanges these for an access token (valid 30 days) and refreshes it 
 - **One Briox customer per WordPress user**, even if the org.nr already exists in Briox. The Briox customer number is stored in user meta `_dyc_briox_customer_id`, and the user is never created twice.
 - **New customers get:** the payment terms from the settings page (default 15 days), price list A, invoices by print (`00`), or by **e-invoice (`02`, "Elektronisk faktura") if the customer ticked "E-Faktura"**, and the invoice email from `billing_invoice_email` (falling back to `billing_email`). Reminders get no email. These defaults can be changed with the `dyc_briox_customer_defaults` filter. They are only sent on create, so changes made in Briox stick.
 - **Updates** read the customer from Briox, change only the fields the website owns (name, org.nr, VAT number, email, phone, reference, addresses, invoice email) and send the complete customer back. The customer and its number stay the same, but Briox's update overwrites all fields: any field left out of the request is cleared. So a partial update would wipe the other fields.
+- **E-invoice setup:** e-invoicing runs through a third party; according to Briox only the company's org.nr is needed and it is set up automatically. The org.nr is always sent (`companynumber`), so no e-invoice address fields are needed.
 - **E-invoice not enabled in Briox:** Briox rejects `02` with `"E-Invoice/Print Service is not enabled."` (as in the test account). The plugin then creates the customer with print (`00`) and shows a warning in the user's sync status and the `dyc-briox` log; change the delivery method in Briox once e-invoicing is enabled.
 - **Invoice template:** the API can't set a customer's default template. "DYC-Faktura" is set as the account-wide default template in Briox.
 

@@ -86,6 +86,10 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             add_filter( 'kadence_blocks_advanced_form_submission_success', array( $this, 'kadence_submission_success' ), 10, 5 );
             add_filter( 'kadence_blocks_advanced_form_submission_messages', array( $this, 'kadence_submission_messages' ), 10, 5 );
 
+            // Notify the site admin of new company registrations (standard WordPress admin email)
+            add_action( 'dyc_b2b_customer_registered', array( $this, 'notify_admin_of_registration' ) );
+            add_filter( 'wp_new_user_notification_email_admin', array( $this, 'company_registration_admin_email' ), 10, 3 );
+
             // Kadence Advanced Form: VIES company name lookup when leaving the org.nr field
             add_filter( 'render_block_kadence/advanced-form-text', array( $this, 'kadence_detect_orgnr_field' ), 10, 2 );
             add_action( 'wp_footer', array( $this, 'kadence_print_lookup_script' ) );
@@ -120,6 +124,55 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         /**
          * Check if current user has business or admin capabilities
          */
+        /** @var int User being notified by notify_admin_of_registration(), so only our email is customized */
+        private static $notifying_user_id = 0;
+
+        /**
+         * Send WordPress's standard "New User Registration" email to the site admin.
+         * WooCommerce's registration doesn't send it, so company registrations would otherwise go unnoticed.
+         */
+        public function notify_admin_of_registration( $user_id ) {
+            self::$notifying_user_id = (int) $user_id;
+            wp_new_user_notification( $user_id, null, 'admin' );
+            self::$notifying_user_id = 0;
+        }
+
+        /**
+         * Turn the standard admin email into a company registration summary
+         */
+        public function company_registration_admin_email( $email, $user, $blogname ) {
+            if ( ! $user instanceof WP_User || (int) $user->ID !== self::$notifying_user_id ) {
+                return $email;
+            }
+
+            $meta = function ( $key ) use ( $user ) {
+                return (string) get_user_meta( $user->ID, $key, true );
+            };
+            $company = $meta( 'billing_company' ) ?: __( '(inget företagsnamn)', 'dyc-b2b-registration' );
+            $address = trim( implode( ', ', array_filter( array( $meta( 'billing_address_1' ), $meta( 'billing_address_2' ), trim( $meta( 'billing_postcode' ) . ' ' . $meta( 'billing_city' ) ) ) ) ) );
+
+            $lines = array(
+                sprintf( __( 'Ett nytt företag har registrerat sig på %s:', 'dyc-b2b-registration' ), $blogname ),
+                '',
+                sprintf( __( 'Företag: %s', 'dyc-b2b-registration' ), $company ),
+                sprintf( __( 'Organisationsnr: %s', 'dyc-b2b-registration' ), $meta( 'billing_orgnr' ) ),
+                sprintf( __( 'Kontaktperson: %s', 'dyc-b2b-registration' ), trim( $meta( 'billing_first_name' ) . ' ' . $meta( 'billing_last_name' ) ) ),
+                sprintf( __( 'E-post: %s', 'dyc-b2b-registration' ), $user->user_email ),
+                sprintf( __( 'Telefon: %s', 'dyc-b2b-registration' ), $meta( 'billing_phone' ) ),
+                sprintf( __( 'Fakturaadress: %s', 'dyc-b2b-registration' ), $address ),
+                sprintf( __( 'Faktura-e-post: %s', 'dyc-b2b-registration' ), $meta( 'billing_invoice_email' ) ?: __( '(samma som e-post)', 'dyc-b2b-registration' ) ),
+                sprintf( __( 'E-faktura: %s', 'dyc-b2b-registration' ), 'yes' === $meta( 'billing_einvoice' ) ? __( 'Ja', 'dyc-b2b-registration' ) : __( 'Nej', 'dyc-b2b-registration' ) ),
+                sprintf( __( 'Användarnamn: %s', 'dyc-b2b-registration' ), $user->user_login ),
+                '',
+                __( 'Kunden skapas automatiskt i Briox. Se kunden och synkstatus här:', 'dyc-b2b-registration' ),
+                admin_url( 'user-edit.php?user_id=' . $user->ID ),
+            );
+
+            $email['subject'] = sprintf( __( '[%1$s] Ny företagsregistrering: %2$s', 'dyc-b2b-registration' ), $blogname, $company );
+            $email['message'] = implode( "\r\n", $lines ) . "\r\n";
+            return $email;
+        }
+
         public function current_user_can_b2b() {
             if ( ! is_user_logged_in() ) {
                 return false;

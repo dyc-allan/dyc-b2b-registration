@@ -65,6 +65,8 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
             add_action( 'woocommerce_customer_save_address', array( $this, 'queue_sync' ) );
             add_action( 'personal_options_update', array( $this, 'queue_sync' ) );
             add_action( 'edit_user_profile_update', array( $this, 'queue_sync' ) );
+            // Admin moves a customer to Business (the profile hooks above run before the new role is saved)
+            add_action( 'set_user_role', array( $this, 'queue_sync_on_business_role' ), 10, 2 );
 
             // Worker (Action Scheduler)
             add_action( self::HOOK, array( $this, 'run_scheduled_sync' ) );
@@ -114,6 +116,12 @@ if ( ! class_exists( 'DYC_Briox_Sync' ) ) {
                 wp_schedule_single_event( time(), self::HOOK, array( $user_id ) );
             }
             $this->set_status( $user_id, 'pending', __( 'Väntar på synkning.', 'dyc-b2b-registration' ) );
+        }
+
+        public function queue_sync_on_business_role( $user_id, $role ) {
+            if ( 'business' === $role ) {
+                $this->queue_sync( $user_id );
+            }
         }
 
         /**

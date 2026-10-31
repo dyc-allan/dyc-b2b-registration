@@ -3,7 +3,7 @@
  * Plugin Name: DYC B2B Registration
  * Plugin URI: https://dockyardcomposites.com
  * Description: Custom B2B registration features for WooCommerce with Swedish Organisationsnummer (Luhn + VIES validation), corporate email checks, Kadence Advanced Form integration and Briox customer sync.
- * Version: 1.5.0
+ * Version: 1.6.0
  * Author: DYC Development
  * Author URI: https://dockyardcomposites.com
  * Requires at least: 5.8
@@ -43,6 +43,8 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         private static $kadence_error = '';
         private static $kadence_vies_company = '';
         private static $kadence_has_orgnr_field = false;
+        /** @var int Existing account found by kadence_validate_advanced_form() that is upgraded instead of creating a new one */
+        private static $kadence_upgrade_user_id = 0;
 
         public static function get_instance() {
             if ( null === self::$instance ) {
@@ -68,6 +70,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             add_filter( 'woocommerce_checkout_posted_data', array( $this, 'lock_orgnr_on_checkout' ) );
             add_filter( 'woocommerce_admin_billing_fields', array( $this, 'add_admin_billing_fields' ) );
 
+            // WP-Admin user profile: admins can enter the org.nr, which turns a registered customer into a business customer
+            add_filter( 'woocommerce_customer_meta_fields', array( $this, 'add_profile_b2b_fields' ) );
+            add_action( 'personal_options_update', array( $this, 'prepare_profile_orgnr' ), 5 ); // before WooCommerce saves the fields
+            add_action( 'edit_user_profile_update', array( $this, 'prepare_profile_orgnr' ), 5 );
+            add_action( 'user_profile_update_errors', array( $this, 'profile_orgnr_errors' ) );
+            add_action( 'profile_update', array( $this, 'promote_profile_to_business' ) );
+
             // Standalone B2B registration shortcodes
             add_shortcode( 'dyc_b2b_registration', array( $this, 'render_b2b_registration_form' ) );
             add_shortcode( 'dyc_b2b_registration_form', array( $this, 'render_b2b_registration_form' ) );
@@ -87,7 +96,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             add_filter( 'kadence_blocks_advanced_form_submission_messages', array( $this, 'kadence_submission_messages' ), 10, 5 );
 
             // Notify the site admin of new company registrations (standard WordPress admin email)
-            add_action( 'dyc_b2b_customer_registered', array( $this, 'notify_admin_of_registration' ) );
+            add_action( 'dyc_b2b_customer_registered', array( $this, 'notify_admin_of_registration' ), 10, 2 );
             add_filter( 'wp_new_user_notification_email_admin', array( $this, 'company_registration_admin_email' ), 10, 3 );
 
             // Kadence Advanced Form: VIES company name lookup when leaving the org.nr field
@@ -127,14 +136,19 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         /** @var int User being notified by notify_admin_of_registration(), so only our email is customized */
         private static $notifying_user_id = 0;
 
+        /** @var bool The notified user was an existing customer upgraded to a company account */
+        private static $notifying_upgrade = false;
+
         /**
          * Send WordPress's standard "New User Registration" email to the site admin.
          * WooCommerce's registration doesn't send it, so company registrations would otherwise go unnoticed.
          */
-        public function notify_admin_of_registration( $user_id ) {
+        public function notify_admin_of_registration( $user_id, $upgraded = false ) {
             self::$notifying_user_id = (int) $user_id;
+            self::$notifying_upgrade = (bool) $upgraded;
             wp_new_user_notification( $user_id, null, 'admin' );
             self::$notifying_user_id = 0;
+            self::$notifying_upgrade = false;
         }
 
         /**
@@ -164,9 +178,15 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 sprintf( __( 'E-faktura: %s', 'dyc-b2b-registration' ), 'yes' === $meta( 'billing_einvoice' ) ? __( 'Ja', 'dyc-b2b-registration' ) : __( 'Nej', 'dyc-b2b-registration' ) ),
                 sprintf( __( 'Användarnamn: %s', 'dyc-b2b-registration' ), $user->user_login ),
                 '',
+            );
+            if ( self::$notifying_upgrade ) {
+                $lines[] = __( 'Kunden hade redan ett kundkonto, som nu har uppgraderats till företagskonto (rollen Business).', 'dyc-b2b-registration' );
+                $lines[] = '';
+            }
+            $lines = array_merge( $lines, array(
                 __( 'Kunden skapas automatiskt i Briox. Se kunden och synkstatus här:', 'dyc-b2b-registration' ),
                 admin_url( 'user-edit.php?user_id=' . $user->ID ),
-            );
+            ) );
 
             $email['subject'] = sprintf( __( '[%1$s] Ny företagsregistrering: %2$s', 'dyc-b2b-registration' ), $blogname, $company );
             $email['message'] = implode( "\r\n", $lines ) . "\r\n";
@@ -325,6 +345,124 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         }
 
         /**
+         * WP-Admin user profile: org.nr after the company and invoice email after the email
+         * in WooCommerce's "Customer billing address" section (WooCommerce also saves them)
+         */
+        public function add_profile_b2b_fields( $fields ) {
+            if ( empty( $fields['billing']['fields'] ) || ! is_array( $fields['billing']['fields'] ) ) {
+                return $fields;
+            }
+
+            $description = __( 'Fyll i organisationsnumret för att göra en registrerad kund till företagskund: rollen ändras då till Business och kunden skapas i Briox. Ange t.ex. 556012-5790 eller momsregistreringsnumret SE556012579001.', 'dyc-b2b-registration' );
+            // user-edit.php / profile.php: show the VAT number derived from the stored org.nr
+            $profile_user = isset( $GLOBALS['profileuser'] ) ? $GLOBALS['profileuser'] : null;
+            if ( $profile_user instanceof WP_User ) {
+                $digits = self::clean_orgnr( (string) get_user_meta( $profile_user->ID, 'billing_orgnr', true ) );
+                if ( 10 === strlen( $digits ) ) {
+                    $description = sprintf( __( 'Momsregistreringsnummer: %s', 'dyc-b2b-registration' ), 'SE' . $digits . '01' ) . '<br>' . $description;
+                }
+            }
+
+            $added = array(
+                'billing_company' => array(
+                    'billing_orgnr' => array(
+                        'label'       => __( 'Organisationsnummer', 'dyc-b2b-registration' ),
+                        'description' => $description,
+                    ),
+                ),
+                'billing_email'   => array(
+                    'billing_invoice_email' => array(
+                        'label'       => __( 'Faktura-e-post', 'dyc-b2b-registration' ),
+                        'description' => __( 'Lämna tomt för att skicka fakturor till e-postadressen ovan.', 'dyc-b2b-registration' ),
+                    ),
+                ),
+            );
+
+            $billing = array();
+            foreach ( $fields['billing']['fields'] as $key => $field ) {
+                $billing[ $key ] = $field;
+                if ( isset( $added[ $key ] ) ) {
+                    $billing += $added[ $key ];
+                }
+            }
+            foreach ( $added as $new ) {
+                $billing += $new; // Fallback if the anchor field was removed by another plugin
+            }
+
+            $fields['billing']['fields'] = $billing;
+            return $fields;
+        }
+
+        /** @var string Error for an invalid org.nr entered on the user profile, reported by profile_orgnr_errors() */
+        private static $profile_orgnr_error = '';
+
+        /** @var int User who got an org.nr on the profile being saved, promoted by promote_profile_to_business() */
+        private static $profile_new_orgnr_user = 0;
+
+        /**
+         * User profile save: validate the posted org.nr and store it as NNNNNN-NNNN.
+         * Runs before WooCommerce saves $_POST, so an invalid number keeps the stored value instead.
+         */
+        public function prepare_profile_orgnr( $user_id ) {
+            self::$profile_orgnr_error    = '';
+            self::$profile_new_orgnr_user = 0;
+            if ( ! isset( $_POST['billing_orgnr'] ) || ! current_user_can( 'manage_woocommerce' ) ) {
+                return;
+            }
+
+            $stored = (string) get_user_meta( $user_id, 'billing_orgnr', true );
+            $posted = trim( sanitize_text_field( wp_unslash( $_POST['billing_orgnr'] ) ) );
+            if ( '' === $posted ) {
+                return;
+            }
+
+            $clean = self::clean_orgnr( $posted );
+            if ( strlen( $clean ) !== 10 || ! self::is_valid_luhn( $clean ) ) {
+                self::$profile_orgnr_error = sprintf( __( 'Ogiltigt organisationsnummer: %s. Kontrollera att det är ett korrekt 10-siffrigt nummer.', 'dyc-b2b-registration' ), $posted );
+                $_POST['billing_orgnr'] = wp_slash( $stored );
+                return;
+            }
+
+            $_POST['billing_orgnr'] = self::format_orgnr( $clean );
+            if ( '' === $stored ) {
+                self::$profile_new_orgnr_user = (int) $user_id;
+            }
+        }
+
+        /**
+         * Show the invalid org.nr error on the profile screen
+         */
+        public function profile_orgnr_errors( $errors ) {
+            if ( '' !== self::$profile_orgnr_error ) {
+                $errors->add( 'dyc_invalid_orgnr', esc_html( self::$profile_orgnr_error ) );
+            }
+        }
+
+        /**
+         * Retail customer got an org.nr from an admin: move them to the Business role.
+         * Runs after the role from the profile form is saved, so it isn't overwritten.
+         */
+        public function promote_profile_to_business( $user_id ) {
+            if ( (int) $user_id !== self::$profile_new_orgnr_user ) {
+                return;
+            }
+            self::$profile_new_orgnr_user = 0;
+
+            $user = get_userdata( $user_id );
+            if ( $user && self::is_retail_user( $user ) ) {
+                $user->set_role( 'business' ); // Briox sync is queued on the role change
+            }
+        }
+
+        /**
+         * Retail customer that may become a business customer (never admins, shop managers etc.)
+         */
+        public static function is_retail_user( $user ) {
+            $roles = (array) $user->roles;
+            return ! empty( $roles ) && ! array_diff( $roles, array( 'customer', 'subscriber' ) );
+        }
+
+        /**
          * Validate Swedish Organisationsnummer with Luhn Algorithm (Modulus 10)
          */
         public static function is_valid_luhn( $number ) {
@@ -412,14 +550,24 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         }
 
         /**
-         * Strip an org.nr to its 10 digits (drops separators and an optional century prefix)
+         * Strip an org.nr to its 10 digits (drops separators and an optional century prefix).
+         * A Swedish VAT number (SE + org.nr + 01) gives its org.nr.
          */
         public static function clean_orgnr( $orgnr ) {
             $clean = preg_replace( '/\D/', '', $orgnr );
-            if ( strlen( $clean ) === 12 ) {
+            if ( strlen( $clean ) === 12 && preg_match( '/^\s*SE/i', $orgnr ) && '01' === substr( $clean, 10 ) ) {
+                $clean = substr( $clean, 0, 10 );
+            } elseif ( strlen( $clean ) === 12 ) {
                 $clean = substr( $clean, 2 );
             }
             return $clean;
+        }
+
+        /**
+         * 10-digit org.nr as stored: NNNNNN-NNNN
+         */
+        public static function format_orgnr( $clean ) {
+            return substr( $clean, 0, 6 ) . '-' . substr( $clean, 6 );
         }
 
         /**
@@ -492,6 +640,46 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
         }
 
         /**
+         * Existing account for a registration email, to be upgraded to a company account instead of creating a new one.
+         * Only the account owner may do this: logged in as that account (with a valid nonce, so a forged post from another
+         * site can't do it) or with the account's password. Otherwise anyone could take over an account by typing its email.
+         *
+         * @return WP_User|WP_Error|null null if no account uses the email.
+         */
+        private static function get_upgradable_account( $email, $password, $nonce_valid ) {
+            $user_id = (int) email_exists( $email );
+            if ( ! $user_id ) {
+                return null;
+            }
+
+            $user = get_userdata( $user_id );
+            if ( in_array( 'business', (array) $user->roles, true ) ) {
+                return new WP_Error( 'dyc_already_business', __( 'Det finns redan ett företagskonto med denna e-postadress. Logga in på Mina sidor med den.', 'dyc-b2b-registration' ) );
+            }
+            if ( ! self::is_retail_user( $user ) ) {
+                return new WP_Error( 'email_exists', __( 'En användare med denna e-postadress finns redan registrerad.', 'dyc-b2b-registration' ) );
+            }
+
+            if ( get_current_user_id() === $user_id ) {
+                if ( $nonce_valid ) {
+                    return $user;
+                }
+                return new WP_Error( 'dyc_bad_nonce', __( 'Säkerhetskontrollen misslyckades. Vänligen ladda om sidan och försök igen.', 'dyc-b2b-registration' ) );
+            }
+
+            if ( '' !== $password ) {
+                // Full login check, so login limiters see failed attempts
+                $auth = wp_authenticate( $user->user_login, $password );
+                if ( ! is_wp_error( $auth ) && (int) $auth->ID === $user_id ) {
+                    return $user;
+                }
+                return new WP_Error( 'dyc_wrong_password', __( 'Det finns redan ett kundkonto med denna e-postadress, men lösenordet stämmer inte. Ange lösenordet till ditt befintliga konto, eller logga in på Mina sidor först och skicka sedan formuläret igen.', 'dyc-b2b-registration' ) );
+            }
+
+            return new WP_Error( 'dyc_login_to_upgrade', __( 'Det finns redan ett kundkonto med denna e-postadress. Logga in på Mina sidor först och skicka sedan formuläret igen, så uppgraderas ditt konto till ett företagskonto.', 'dyc-b2b-registration' ) );
+        }
+
+        /**
          * Helper: Extract fields by inputName or label from Kadence processed fields
          */
         public function kadence_extract_fields( $processed_fields ) {
@@ -547,6 +735,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 return $reject;
             }
 
+            self::$kadence_error           = '';
+            self::$kadence_upgrade_user_id = 0;
+
             $orgnr      = $this->kadence_get( $data, 'billing_orgnr' );
             $company    = $this->kadence_get( $data, 'billing_company' );
             $first_name = $this->kadence_get( $data, 'billing_first_name' );
@@ -594,14 +785,19 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 self::$kadence_error = __( 'Vänligen ange en giltig e-postadress.', 'dyc-b2b-registration' );
                 return true;
             }
-            if ( email_exists( $email ) ) {
-                self::$kadence_error = __( 'En användare med denna e-postadress finns redan registrerad.', 'dyc-b2b-registration' );
-                return true;
-            }
             if ( self::is_public_email_domain( $email ) ) {
                 self::$kadence_error = __( 'Vänligen ange en företags-e-postadress. Privata e-posttjänster (Gmail, Hotmail, etc.) tillåts inte för B2B-konton.', 'dyc-b2b-registration' );
                 return true;
             }
+
+            // A registered customer with this email is upgraded instead (nonce added by kadence_print_lookup_script())
+            $nonce_valid = isset( $_POST['dyc_b2b_upgrade_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['dyc_b2b_upgrade_nonce'] ) ), 'dyc_b2b_upgrade' );
+            $account     = self::get_upgradable_account( $email, $password, $nonce_valid );
+            if ( is_wp_error( $account ) ) {
+                self::$kadence_error = $account->get_error_message();
+                return true;
+            }
+            self::$kadence_upgrade_user_id = $account ? (int) $account->ID : 0;
 
             // 4. Validate Invoice Email if provided
             if ( ! empty( $inv_email ) && ! is_email( $inv_email ) ) {
@@ -609,8 +805,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 return true;
             }
 
-            // 5. Validate Password if provided (otherwise one is generated and WooCommerce emails a set-password link)
-            if ( '' !== $password ) {
+            // 5. Validate Password if provided (otherwise one is generated and WooCommerce emails a set-password link).
+            // An upgraded account keeps its password.
+            if ( '' !== $password && ! self::$kadence_upgrade_user_id ) {
                 if ( strlen( $password ) < 8 ) {
                     self::$kadence_error = __( 'Lösenordet måste bestå av minst 8 tecken.', 'dyc-b2b-registration' );
                     return true;
@@ -663,12 +860,16 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             $password    = $this->kadence_get_password( 'password' );
 
             // Format org.nr (already validated in kadence_validate_advanced_form)
-            $clean_org       = self::clean_orgnr( $orgnr );
-            $formatted_orgnr = substr( $clean_org, 0, 6 ) . '-' . substr( $clean_org, 6 );
+            $formatted_orgnr = self::format_orgnr( self::clean_orgnr( $orgnr ) );
 
-            // Create WooCommerce customer. An empty password lets WooCommerce generate one and email a set-password link.
-            $username    = self::generate_unique_username( $email );
-            $customer_id = wc_create_new_customer( $email, $username, $password );
+            if ( self::$kadence_upgrade_user_id ) {
+                // Registered customer (verified in kadence_validate_advanced_form): update the account instead
+                $customer_id = self::$kadence_upgrade_user_id;
+            } else {
+                // Create WooCommerce customer. An empty password lets WooCommerce generate one and email a set-password link.
+                $username    = self::generate_unique_username( $email );
+                $customer_id = wc_create_new_customer( $email, $username, $password );
+            }
 
             if ( is_wp_error( $customer_id ) ) {
                 // Picked up by kadence_submission_success() so the form reports failure instead of success
@@ -697,9 +898,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             }
             update_user_meta( $customer_id, 'billing_phone', $phone );
             update_user_meta( $customer_id, 'billing_address_1', $address_1 );
-            if ( $address_2 ) {
-                update_user_meta( $customer_id, 'billing_address_2', $address_2 );
-            }
+            update_user_meta( $customer_id, 'billing_address_2', $address_2 ); // Also clears an upgraded account's old value
             update_user_meta( $customer_id, 'billing_postcode', $postcode );
             update_user_meta( $customer_id, 'billing_city', $city );
             update_user_meta( $customer_id, 'billing_country', $country );
@@ -718,15 +917,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             update_user_meta( $customer_id, 'shipping_last_name', $s_last_name );
             update_user_meta( $customer_id, 'shipping_company', $s_company );
             update_user_meta( $customer_id, 'shipping_address_1', $s_address_1 );
-            if ( $s_address_2 ) {
-                update_user_meta( $customer_id, 'shipping_address_2', $s_address_2 );
-            }
+            update_user_meta( $customer_id, 'shipping_address_2', $s_address_2 );
             update_user_meta( $customer_id, 'shipping_postcode', $s_postcode );
             update_user_meta( $customer_id, 'shipping_city', $s_city );
             update_user_meta( $customer_id, 'shipping_country', $s_country );
 
             // Let integrations (Briox sync) pick up the new business customer
-            do_action( 'dyc_b2b_customer_registered', $customer_id );
+            do_action( 'dyc_b2b_customer_registered', $customer_id, (bool) self::$kadence_upgrade_user_id );
 
             // Kadence redirects straight away, so confirm the registration on the next page instead
             update_user_meta( $customer_id, '_dyc_b2b_show_welcome', 1 );
@@ -781,6 +978,8 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             $config = array(
                 'ajaxUrl' => admin_url( 'admin-ajax.php' ),
                 'nonce'   => wp_create_nonce( 'dyc_b2b_nonce' ),
+                // Lets a logged-in customer upgrade their own account (see get_upgradable_account())
+                'upgradeNonce' => is_user_logged_in() ? wp_create_nonce( 'dyc_b2b_upgrade' ) : '',
                 'i18n'    => array(
                     'checking'    => __( 'Kontrollerar hos Skatteverket/VIES...', 'dyc-b2b-registration' ),
                     'placeholder' => __( 'Fylls i automatiskt från organisationsnumret', 'dyc-b2b-registration' ),
@@ -804,6 +1003,14 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                     var company = form.querySelector( 'input[name="billing_company"]' );
                     if ( ! orgnr || ! company ) {
                         return;
+                    }
+
+                    if ( cfg.upgradeNonce ) {
+                        var upgradeNonce = document.createElement( 'input' );
+                        upgradeNonce.type = 'hidden';
+                        upgradeNonce.name = 'dyc_b2b_upgrade_nonce';
+                        upgradeNonce.value = cfg.upgradeNonce;
+                        form.appendChild( upgradeNonce );
                     }
 
                     var status = document.createElement( 'span' );
@@ -967,12 +1174,18 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             if ( empty( $first_name ) || empty( $last_name ) ) {
                 $errors->add( 'empty_name', __( 'Kontaktperson (för- och efternamn) är obligatoriskt.', 'dyc-b2b-registration' ) );
             }
+            $account = null; // Registered customer with this email, upgraded instead of creating a new account
             if ( empty( $email ) || ! is_email( $email ) ) {
                 $errors->add( 'invalid_email', __( 'Vänligen ange en giltig e-postadress.', 'dyc-b2b-registration' ) );
-            } elseif ( email_exists( $email ) ) {
-                $errors->add( 'email_exists', __( 'En användare med denna e-postadress finns redan registrerad.', 'dyc-b2b-registration' ) );
             } elseif ( self::is_public_email_domain( $email ) ) {
                 $errors->add( 'public_email', __( 'Vänligen ange en företags-e-postadress. Privata e-posttjänster (Gmail, Hotmail, etc.) tillåts inte för B2B-konton.', 'dyc-b2b-registration' ) );
+            } else {
+                // The form nonce was verified above
+                $account = self::get_upgradable_account( $email, $password, true );
+                if ( is_wp_error( $account ) ) {
+                    $errors->add( $account->get_error_code(), $account->get_error_message() );
+                    $account = null;
+                }
             }
             if ( ! empty( $inv_email ) && ! is_email( $inv_email ) ) {
                 $errors->add( 'invalid_inv_email', __( 'Vänligen ange en giltig faktura-e-postadress.', 'dyc-b2b-registration' ) );
@@ -980,16 +1193,16 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             if ( empty( $address_1 ) || empty( $postcode ) || empty( $city ) ) {
                 $errors->add( 'empty_address', __( 'Faktureringsadress (gatuadress, postnummer och ort) är obligatorisk.', 'dyc-b2b-registration' ) );
             }
-            if ( empty( $password ) || strlen( $password ) < 8 ) {
+            // An upgraded account keeps its password
+            if ( $account ) {
+                // Nothing to check
+            } elseif ( empty( $password ) || strlen( $password ) < 8 ) {
                 $errors->add( 'invalid_password', __( 'Lösenordet måste bestå av minst 8 tecken.', 'dyc-b2b-registration' ) );
             } elseif ( $password !== $password_c ) {
                 $errors->add( 'password_mismatch', __( 'Lösenorden matchar inte.', 'dyc-b2b-registration' ) );
             }
 
-            $clean_org = preg_replace( '/\D/', '', $orgnr );
-            if ( strlen( $clean_org ) === 12 ) {
-                $clean_org = substr( $clean_org, 2 );
-            }
+            $clean_org = self::clean_orgnr( $orgnr );
             if ( strlen( $clean_org ) !== 10 || ! self::is_valid_luhn( $clean_org ) ) {
                 $errors->add( 'invalid_orgnr', __( 'Ogiltigt organisationsnummer. Kontrollera att det är ett korrekt 10-siffrigt nummer.', 'dyc-b2b-registration' ) );
             } else {
@@ -1012,9 +1225,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 return;
             }
 
-            $formatted_orgnr = substr( $clean_org, 0, 6 ) . '-' . substr( $clean_org, 6 );
-            $username        = self::generate_unique_username( $email );
-            $customer_id     = wc_create_new_customer( $email, $username, $password );
+            $formatted_orgnr = self::format_orgnr( $clean_org );
+            if ( $account ) {
+                $customer_id = (int) $account->ID;
+            } else {
+                $username    = self::generate_unique_username( $email );
+                $customer_id = wc_create_new_customer( $email, $username, $password );
+            }
 
             if ( is_wp_error( $customer_id ) ) {
                 wc_add_notice( $customer_id->get_error_message(), 'error' );
@@ -1039,6 +1256,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             }
             update_user_meta( $customer_id, 'billing_phone', $phone );
             update_user_meta( $customer_id, 'billing_address_1', $address_1 );
+            update_user_meta( $customer_id, 'billing_address_2', '' ); // Not in this form; clears an upgraded account's old value
             update_user_meta( $customer_id, 'billing_postcode', $postcode );
             update_user_meta( $customer_id, 'billing_city', $city );
             update_user_meta( $customer_id, 'billing_country', $country );
@@ -1047,12 +1265,13 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
             update_user_meta( $customer_id, 'shipping_last_name', $last_name );
             update_user_meta( $customer_id, 'shipping_company', $company );
             update_user_meta( $customer_id, 'shipping_address_1', $s_address_1 );
+            update_user_meta( $customer_id, 'shipping_address_2', '' );
             update_user_meta( $customer_id, 'shipping_postcode', $s_postcode );
             update_user_meta( $customer_id, 'shipping_city', $s_city );
             update_user_meta( $customer_id, 'shipping_country', $country );
 
             // Let integrations (Briox sync) pick up the new business customer
-            do_action( 'dyc_b2b_customer_registered', $customer_id );
+            do_action( 'dyc_b2b_customer_registered', $customer_id, (bool) $account );
 
             wp_set_current_user( $customer_id );
             wp_set_auth_cookie( $customer_id );
@@ -1060,7 +1279,12 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                 wc_set_customer_auth_cookie( $customer_id );
             }
 
-            wc_add_notice( __( 'Välkommen! Ditt företagskonto har registrerats och du är nu inloggad.', 'dyc-b2b-registration' ), 'success' );
+            wc_add_notice(
+                $account
+                    ? __( 'Välkommen! Ditt kundkonto har uppgraderats till ett företagskonto.', 'dyc-b2b-registration' )
+                    : __( 'Välkommen! Ditt företagskonto har registrerats och du är nu inloggad.', 'dyc-b2b-registration' ),
+                'success'
+            );
             wp_safe_redirect( wc_get_page_permalink( 'myaccount' ) );
             exit;
         }
@@ -1069,7 +1293,9 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
          * Render the Standalone B2B Registration Shortcode Form
          */
         public function render_b2b_registration_form() {
-            if ( is_user_logged_in() ) {
+            // Logged-in retail customers get the form to upgrade their account
+            $logged_in = is_user_logged_in();
+            if ( $logged_in && ! self::is_retail_user( wp_get_current_user() ) ) {
                 $user = wp_get_current_user();
                 $account_url = wc_get_page_permalink( 'myaccount' );
                 return '<div class="woocommerce-message" style="margin-bottom:20px;">' . 
@@ -1122,7 +1348,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                         <div class="dyc-grid-2">
                             <div class="dyc-form-row">
                                 <label for="dyc_billing_email"><?php _e( 'Företags-e-postadress', 'dyc-b2b-registration' ); ?> <span class="required">*</span></label>
-                                <input type="email" name="billing_email" id="dyc_billing_email" placeholder="namn@foretag.se" value="<?php echo ! empty( $_POST['billing_email'] ) ? esc_attr( $_POST['billing_email'] ) : ''; ?>" required />
+                                <input type="email" name="billing_email" id="dyc_billing_email" placeholder="namn@foretag.se" value="<?php echo ! empty( $_POST['billing_email'] ) ? esc_attr( $_POST['billing_email'] ) : ( $logged_in ? esc_attr( wp_get_current_user()->user_email ) : '' ); ?>" required <?php echo $logged_in ? 'readonly' : ''; ?> />
                                 <small class="dyc-help-text"><?php _e( 'Ange din företags-e-post (Gmail/Hotmail etc. accepteras ej).', 'dyc-b2b-registration' ); ?></small>
                             </div>
                             <div class="dyc-form-row">
@@ -1146,6 +1372,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                             <div></div>
                         </div>
 
+                        <?php if ( ! $logged_in ) : // An upgraded account keeps its password ?>
                         <div class="dyc-grid-2">
                             <div class="dyc-form-row">
                                 <label for="dyc_password"><?php _e( 'Lösenord (minst 8 tecken)', 'dyc-b2b-registration' ); ?> <span class="required">*</span></label>
@@ -1156,6 +1383,7 @@ if ( ! class_exists( 'DYC_B2B_Registration' ) ) {
                                 <input type="password" name="password_confirm" id="dyc_password_confirm" required autocomplete="new-password" />
                             </div>
                         </div>
+                        <?php endif; ?>
                     </div>
 
                     <div class="dyc-b2b-section">

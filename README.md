@@ -24,7 +24,14 @@ Custom B2B registration plugin for WooCommerce with Swedish Organisationsnummer 
   - Keeps standard WooCommerce registration (`/mina-sidor/`) 100% clean for retail consumers.
   - Runs after Kadence Woo Extras' checkout field editor, which would otherwise re-add the fields for everyone.
 - **Locked Organisationsnummer**: Once stored, `billing_orgnr` is read-only for the customer in My Account and at checkout, and any submitted change is ignored server-side. Users without a stored org.nr can still enter one. Change it from WP-Admin if needed.
-- **WP-Admin**: Org.nr and invoice email are shown on the order and user edit screens.
+- **WP-Admin**: Org.nr and invoice email are shown on the order screen and in the "Customer billing address" section of the user edit screen (users with `manage_woocommerce`).
+  - The org.nr is validated (Luhn) and saved as `NNNNNN-NNNN`; a Swedish VAT number (`SE556012579001`) is also accepted. An invalid number is not saved and an error is shown. The derived VAT number is shown under the field.
+  - **Make a registered customer a business customer**: enter the org.nr for a user with the `customer` (or `subscriber`) role who had none. On save, the role changes to `business` and the customer is created in Briox. Setting the role to Business manually also queues the Briox sync.
+- **Existing customers registering as a company**: The email is the unique identifier, so if a retail customer (`customer`/`subscriber` role) submits the B2B form with their account's email, that account is upgraded instead of a new one being created: the submitted details overwrite the billing/shipping details, the role changes to `business`, the customer is synced to Briox and the admin email says the account was upgraded. The password is kept. The customer must prove the account is theirs, otherwise anyone could take over an account by typing its email:
+  - Logged in as that account: upgraded directly. The Kadence form gets a hidden per-user nonce (`dyc_b2b_upgrade_nonce`), so a forged post from another site can't upgrade a logged-in customer.
+  - Not logged in: the form asks them to log in on Mina sidor first and submit again. If the form has a `password` field (the shortcode form does), the account's current password also works (checked with the normal WordPress login, so login limiters see failed attempts).
+  - An email that belongs to a business account, or to an admin/shop manager, is rejected as before.
+  - The shortcode form is shown to logged-in retail customers with their email pre-filled (read-only) and without password fields.
 - **Briox Sync**: New business customers are created as customers in Briox, and later address changes are sent to Briox (see below).
 
 ## Setup
@@ -46,7 +53,7 @@ Set each field's **Field Name** (the input's `name` attribute) to match the WooC
 | `billing_company` | Yes | Read-only and filled in from VIES when the customer leaves the org.nr field. Unlocks for manual entry if VIES has no name (service down or name not disclosed). The VIES name is also enforced server-side. |
 | `billing_first_name` | Yes | |
 | `billing_last_name` | Yes | |
-| `billing_email` | Yes | Must be a corporate address and not already registered. Used as the login email. |
+| `billing_email` | Yes | Must be a corporate address. Used as the login email. If a retail customer already uses it, their account is upgraded (see "Existing customers registering as a company"). |
 | `billing_address_1` | Yes | |
 | `billing_postcode` | Yes | |
 | `billing_city` | Yes | |
